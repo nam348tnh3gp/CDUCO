@@ -5,10 +5,10 @@ LDFLAGS = -lm -pthread
 
 all: miner
 
-miner: miner.c DSHA1.h
+miner: main.c DSHA1.h
 	$(CC) $(CFLAGS) -std=c99 -o miner miner.c $(LDFLAGS)
 
-debug: miner.c DSHA1.h
+debug: main.c DSHA1.h
 	$(CC) -Wall -g -O0 -DDEBUG -std=c99 -o miner_debug miner.c $(LDFLAGS)
 
 clean:
