@@ -1,12 +1,12 @@
 # Compiler
 CC = clang
 
-# Phát hiện hệ điều hành
+# Phát hiện hệ điều hành và kiến trúc
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
-# Cờ tối ưu cơ bản
-CFLAGS = -O3 -pthread -flto -ffast-math -fomit-frame-pointer
+# Cờ tối ưu cơ bản (bỏ -flto để tránh lỗi)
+CFLAGS = -O3 -pthread -ffast-math -fomit-frame-pointer
 LDFLAGS = -lm
 
 # Cấu hình theo hệ điều hành
@@ -33,17 +33,19 @@ else
     LDFLAGS += -lcrypto
     TARGET = ducominer
     
-    # Tối ưu architecture
+    # Tối ưu architecture (không dùng -flto)
     ifeq ($(UNAME_M), aarch64)
-        CFLAGS += -march=armv8-a+crypto
+        CFLAGS += -march=armv8-a+crypto -mtune=cortex-a76
     else ifeq ($(UNAME_M), armv7l)
-        CFLAGS += -march=armv7-a -mfpu=neon
+        CFLAGS += -march=armv7-a -mfpu=neon -mfloat-abi=hard
     else ifeq ($(UNAME_M), x86_64)
         CFLAGS += -march=native
+    else ifeq ($(UNAME_M), i686)
+        CFLAGS += -march=i686 -mtune=core2
     endif
 endif
 
-# Thêm warning flags
+# Thêm warning flags (giảm bớt để tránh cảnh báo không cần thiết)
 CFLAGS += -Wall
 
 # Target mặc định
@@ -53,6 +55,15 @@ $(TARGET): main.c
 	$(CC) $(CFLAGS) -o $(TARGET) main.c $(LDFLAGS)
 	@echo "✅ Build thành công: $(TARGET)"
 	@echo "📊 Kích thước: $$(ls -lh $(TARGET) | awk '{print $$5}')"
+	@echo "🔧 Kiến trúc: $$(file $(TARGET) | cut -d: -f2)"
+
+# Build với debug (không tối ưu, dễ debug)
+debug: CFLAGS = -O0 -g -pthread -Wall -DUSE_OPENSSL
+debug: $(TARGET)
+
+# Build với tối ưu cao nhất (nếu muốn thử lại -flto)
+extreme: CFLAGS += -O3 -funroll-loops -fprefetch-loop-arrays
+extreme: $(TARGET)
 
 # Dọn dẹp
 clean:
@@ -64,8 +75,12 @@ run: $(TARGET)
 
 # Hiển thị thông tin
 info:
-	@echo "OS: $(UNAME_S) | Arch: $(UNAME_M)"
+	@echo "=== Thông tin build ==="
+	@echo "OS: $(UNAME_S)"
+	@echo "Arch: $(UNAME_M)"
 	@echo "Compiler: $(CC)"
 	@echo "CFLAGS: $(CFLAGS)"
+	@echo "LDFLAGS: $(LDFLAGS)"
+	@echo "======================"
 
-.PHONY: all clean run info
+.PHONY: all clean run info debug extreme
