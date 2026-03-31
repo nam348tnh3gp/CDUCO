@@ -234,7 +234,7 @@ limitations under the License.
 ## 📧 Contact & Support
 
 - **Issues**: [GitHub Issues](https://github.com/nam348tnh3gp/CDUCO/issues)
-- **Discord**: [Join Duino-Coin Discord](https://discord.gg/duinocoin)
+- **Discord**: [Join Duino-Coin Discord](https://discord.gg/duino-coin-677615191793467402)
 
 ---
 
