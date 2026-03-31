@@ -7,8 +7,10 @@
 #include <ctype.h>
 #include <signal.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
-// Sử dụng DSHA1.h C version
 #include "DSHA1.h"
 
 // -------------------- Cấu hình --------------------
@@ -67,8 +69,7 @@ int get_pool(PoolInfo *pool) {
     
     printf("🌐 Đang lấy pool từ server...\n");
     
-    // Dùng link getPool mới
-    fp = popen("curl -s --max-time 10 https://ducofaucet.nam348tnh.workers.dev/getPool 2>/dev/null", "r");
+    fp = popen("curl -s --max-time 10 https://server.duinocoin.com/getPool 2>/dev/null", "r");
     if (!fp) {
         printf("❌ Không thể kết nối đến server getPool\n");
         return 0;
@@ -80,8 +81,6 @@ int get_pool(PoolInfo *pool) {
         return 0;
     }
     pclose(fp);
-    
-    printf("📡 Response: %s\n", buf);
     
     // Parse JSON response
     char *ip_start = strstr(buf, "\"ip\":\"");
@@ -111,27 +110,50 @@ int get_pool(PoolInfo *pool) {
     port_start += 7;
     pool->port = atoi(port_start);
     
-    // Lấy tên pool nếu có
-    char *name_start = strstr(buf, "\"name\":\"");
-    if (name_start) {
-        name_start += 8;
-        char *name_end = strchr(name_start, '"');
-        if (name_end) {
-            int name_len = name_end - name_start;
-            char pool_name[64];
-            if (name_len >= (int)sizeof(pool_name)) name_len = sizeof(pool_name) - 1;
-            strncpy(pool_name, name_start, name_len);
-            pool_name[name_len] = '\0';
-            printf("✅ Lấy pool thành công: %s:%d (%s)\n", pool->ip, pool->port, pool_name);
-            return 1;
-        }
-    }
-    
     printf("✅ Lấy pool thành công: %s:%d\n", pool->ip, pool->port);
     return 1;
 }
 
-// -------------------- Hàm tính SHA1 sử dụng DSHA1 (C version) --------------------
+// -------------------- Tạo kết nối TCP --------------------
+int tcp_connect(const char *ip, int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &addr.sin_addr);
+    
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+    
+    return sock;
+}
+
+// -------------------- Gửi và nhận dữ liệu qua TCP --------------------
+int send_tcp(int sock, const char *data) {
+    ssize_t len = strlen(data);
+    ssize_t sent = send(sock, data, len, 0);
+    return sent == len ? 1 : 0;
+}
+
+int recv_line(int sock, char *buffer, size_t size) {
+    size_t i = 0;
+    char c;
+    while (i < size - 1 && recv(sock, &c, 1, 0) > 0) {
+        if (c == '\n') {
+            buffer[i] = '\0';
+            return 1;
+        }
+        buffer[i++] = c;
+    }
+    buffer[i] = '\0';
+    return i > 0 ? 1 : 0;
+}
+
+// -------------------- Hàm tính SHA1 --------------------
 static inline void sha1_string(const char *input, unsigned char *output) {
     DSHA1_CTX ctx;
     dsha1_init(&ctx);
@@ -146,7 +168,6 @@ typedef struct {
     int diff;
 } Job;
 
-// Tìm nonce thỏa mãn
 static inline long long solve_job(const Job *job, double *elapsed_ms) {
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -201,27 +222,6 @@ static inline const char* format_hashrate(double h) {
     return buf;
 }
 
-// Hàm gửi request qua curl
-static char* curl_request(const char *url, const char *data, char *response, size_t response_size) {
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "curl -s --max-time 10 -X POST -d \"%s\" \"%s\" 2>/dev/null", data, url);
-    
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return NULL;
-    
-    if (fgets(response, response_size, fp) == NULL) {
-        pclose(fp);
-        return NULL;
-    }
-    pclose(fp);
-    
-    // Xóa ký tự newline
-    char *newline = strchr(response, '\n');
-    if (newline) *newline = '\0';
-    
-    return response;
-}
-
 // -------------------- Worker thread --------------------
 typedef struct {
     int id;
@@ -245,43 +245,54 @@ void *worker_thread(void *arg) {
             continue;
         }
         
-        char url[128];
-        snprintf(url, sizeof(url), "http://%s:%d", pool.ip, pool.port);
-        printf("[worker%d] 🔌 Kết nối tới %s\n", id, url);
-
-        char response[1024];
-        int accepted = 0, rejected = 0;
+        printf("[worker%d] 🔌 Kết nối TCP tới %s:%d\n", id, pool.ip, pool.port);
+        
+        int sock = tcp_connect(pool.ip, pool.port);
+        if (sock < 0) {
+            fprintf(stderr, "[worker%d] ❌ Không thể kết nối, thử lại sau 5s\n", id);
+            sleep(5);
+            continue;
+        }
+        
+        // Đọc server version
+        char server_version[128];
+        if (recv_line(sock, server_version, sizeof(server_version))) {
+            printf("[worker%d] ✅ Kết nối thành công (server v%s)\n", id, server_version);
+        }
+        
+        int accepted = 0;
+        int rejected = 0;
         time_t t0 = time(NULL);
         time_t last_stats = t0;
-        int consecutive_failures = 0;
-
+        
         while (g_running) {
             // Gửi request JOB
             char req[256];
-            snprintf(req, sizeof(req), "JOB,%s,%s,%s", cfg.username, cfg.difficulty, cfg.mining_key);
+            snprintf(req, sizeof(req), "JOB,%s,%s,%s\n", 
+                     cfg.username, cfg.difficulty, cfg.mining_key);
             
-            if (!curl_request(url, req, response, sizeof(response))) {
-                consecutive_failures++;
-                if (consecutive_failures >= 3) {
-                    printf("[worker%d] ⚠️ Mất kết nối sau %d lần thất bại\n", id, consecutive_failures);
-                    break;
-                }
-                sleep(1);
-                continue;
+            if (!send_tcp(sock, req)) {
+                printf("[worker%d] ⚠️ Gửi request thất bại\n", id);
+                break;
             }
             
-            consecutive_failures = 0;
+            // Nhận job
+            char jobline[1024];
+            if (!recv_line(sock, jobline, sizeof(jobline))) {
+                printf("[worker%d] ⚠️ Không nhận được job\n", id);
+                break;
+            }
             
-            // Parse response
-            char *base = strtok(response, ",");
+            // Parse job: base,target,diff
+            char *base = strtok(jobline, ",");
             char *target_hex = strtok(NULL, ",");
             char *diff_str = strtok(NULL, ",");
             
             if (!base || !target_hex || !diff_str) {
-                printf("[worker%d] ⚠️ Response lỗi: %s\n", id, response);
+                printf("[worker%d] ⚠️ Job format lỗi: %s\n", id, jobline);
                 continue;
             }
-
+            
             Job job;
             strcpy(job.base, base);
             if (strlen(target_hex) != 40) continue;
@@ -289,38 +300,44 @@ void *worker_thread(void *arg) {
                 sscanf(target_hex + i*2, "%2hhx", &job.target[i]);
             }
             job.diff = atoi(diff_str);
-
+            
             double elapsed_ms;
             long long nonce = solve_job(&job, &elapsed_ms);
             
             if (nonce >= 0) {
-                double hashrate = 1e6 * nonce / (elapsed_ms * 1000.0);
+                double hashrate = (nonce * 1000.0) / elapsed_ms;
                 
                 // Gửi kết quả
                 char result[256];
-                snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,%u", 
+                snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,%u\n", 
                          nonce, hashrate, cfg.rig_identifier, mtid);
                 
-                if (curl_request(url, result, response, sizeof(response))) {
-                    if (strcmp(response, "GOOD") == 0) {
-                        accepted++;
-                        printf("[worker%d] ✅ Share accepted | %s | Total: %d\n",
-                               id, format_hashrate(hashrate), accepted);
-                    } else if (strncmp(response, "BAD,", 4) == 0) {
-                        rejected++;
-                        printf("[worker%d] ❌ Rejected: %s (rej=%d)\n",
-                               id, response+4, rejected);
-                    } else if (strcmp(response, "BLOCK") == 0) {
-                        printf("[worker%d] ⛓️ NEW BLOCK FOUND!\n", id);
-                        accepted++;
-                    } else {
-                        printf("[worker%d] ⚠️ Unknown response: %s\n", id, response);
-                    }
-                } else {
-                    printf("[worker%d] ⚠️ Không gửi được kết quả\n", id);
+                if (!send_tcp(sock, result)) {
+                    printf("[worker%d] ⚠️ Gửi kết quả thất bại\n", id);
                     break;
                 }
-
+                
+                // Nhận feedback
+                char feedback[128];
+                if (!recv_line(sock, feedback, sizeof(feedback))) {
+                    printf("[worker%d] ⚠️ Không nhận được feedback\n", id);
+                    break;
+                }
+                
+                if (strcmp(feedback, "GOOD") == 0) {
+                    accepted++;
+                    printf("[worker%d] ✅ Share accepted | %s | Total: %d\n",
+                           id, format_hashrate(hashrate), accepted);
+                } else if (strncmp(feedback, "BAD,", 4) == 0) {
+                    rejected++;
+                    printf("[worker%d] ❌ Rejected: %s (rej=%d)\n",
+                           id, feedback+4, rejected);
+                } else if (strcmp(feedback, "BLOCK") == 0) {
+                    printf("[worker%d] ⛓️ NEW BLOCK FOUND!\n", id);
+                } else {
+                    printf("[worker%d] ℹ️ %s\n", id, feedback);
+                }
+                
                 time_t now = time(NULL);
                 if (now - last_stats >= 30) {
                     double uptime = difftime(now, t0);
@@ -333,9 +350,11 @@ void *worker_thread(void *arg) {
             }
         }
         
+        close(sock);
+        
         if (g_running) {
-            fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, reconnect sau 5s...\n", id);
-            sleep(5);
+            fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, reconnect sau 2s...\n", id);
+            sleep(2);
         }
     }
     return NULL;
@@ -366,8 +385,6 @@ int main() {
     printf("Difficulty: %s\n", cfg.difficulty);
     printf("Rig:        %s\n", cfg.rig_identifier);
     printf("Threads:    %d\n", cfg.thread_count);
-    printf("========================================\n");
-    printf("GetPool URL: https://ducofaucet.nam348tnh.workers.dev/getPool\n");
     printf("========================================\n\n");
 
     srand(time(NULL));
