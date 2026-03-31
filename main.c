@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <time.h>
 #include <ctype.h>
+#include <signal.h>
 
 #include "dsha1.h"
 
@@ -20,7 +21,16 @@ typedef struct {
     char difficulty[16];
     char rig_identifier[64];
     int thread_count;
+    int running;
 } Config;
+
+static volatile int g_running = 1;
+
+void signal_handler(int sig) {
+    (void)sig;
+    printf("\n🛑 Đang dừng miner...\n");
+    g_running = 0;
+}
 
 // Đọc file config dạng key=value
 int read_config(const char *filename, Config *cfg) {
@@ -28,12 +38,10 @@ int read_config(const char *filename, Config *cfg) {
     if (!f) return 0;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
-        // Bỏ dòng trống và comment
         if (line[0] == '\n' || line[0] == '#') continue;
         char *key = strtok(line, "=");
         char *val = strtok(NULL, "\n");
         if (!key || !val) continue;
-        // Xóa khoảng trắng đầu cuối
         while (isspace(*key)) key++;
         char *end = key + strlen(key) - 1;
         while (end > key && isspace(*end)) *end-- = '\0';
@@ -58,8 +66,7 @@ typedef struct {
 } PoolInfo;
 
 int get_pool(PoolInfo *pool) {
-    // Dùng lệnh curl để lấy JSON
-    FILE *fp = popen("curl -s https://server.duinocoin.com/getPool", "r");
+    FILE *fp = popen("curl -s --max-time 5 https://server.duinocoin.com/getPool", "r");
     if (!fp) return 0;
     char buf[256];
     if (!fgets(buf, sizeof(buf), fp)) {
@@ -67,7 +74,7 @@ int get_pool(PoolInfo *pool) {
         return 0;
     }
     pclose(fp);
-    // Parse JSON thủ công: {"ip":"xxx","port":yyy}
+    
     char *ip_start = strstr(buf, "\"ip\":\"");
     if (!ip_start) return 0;
     ip_start += 6;
@@ -85,8 +92,8 @@ int get_pool(PoolInfo *pool) {
     return 1;
 }
 
-// -------------------- Hàm tính SHA1 sử dụng DSHA1 --------------------
-void sha1_string(const char *input, unsigned char *output) {
+// -------------------- Hàm tính SHA1 sử dụng DSHA1 tối ưu --------------------
+static inline void sha1_string(const char *input, unsigned char *output) {
     DSHA1 ctx;
     dsha1_init(&ctx);
     dsha1_write(&ctx, (const unsigned char*)input, strlen(input));
@@ -96,30 +103,49 @@ void sha1_string(const char *input, unsigned char *output) {
 // -------------------- Giải job --------------------
 typedef struct {
     char base[256];
-    unsigned char target[20];   // SHA1 là 20 byte
+    unsigned char target[20];
     int diff;
 } Job;
 
-// Tìm nonce thỏa mãn
-long long solve_job(const Job *job, double *elapsed_ms) {
+// Tìm nonce thỏa mãn - TỐI ƯU CAO
+static inline long long solve_job(const Job *job, double *elapsed_ms) {
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    char nonce_str[32];
+    char nonce_str[16];
     unsigned char hash[20];
     long long max_nonce = job->diff * 100;
-    // Dùng buffer để nối base + nonce
     char buffer[512];
     int base_len = strlen(job->base);
+    
+    // Copy base một lần
     memcpy(buffer, job->base, base_len);
+    
+    // Cache target để so sánh nhanh
+    const unsigned char *target = job->target;
+    
     for (long long nonce = 0; nonce <= max_nonce; nonce++) {
-        sprintf(nonce_str, "%lld", nonce);
-        int nonce_len = strlen(nonce_str);
-        memcpy(buffer + base_len, nonce_str, nonce_len);
-        buffer[base_len + nonce_len] = '\0';
-
+        // Tối ưu sprintf cho số nhỏ
+        if (nonce < 10) {
+            buffer[base_len] = '0' + nonce;
+            buffer[base_len + 1] = '\0';
+        } else if (nonce < 100) {
+            buffer[base_len] = '0' + (nonce / 10);
+            buffer[base_len + 1] = '0' + (nonce % 10);
+            buffer[base_len + 2] = '\0';
+        } else {
+            sprintf(nonce_str, "%lld", nonce);
+            int nonce_len = strlen(nonce_str);
+            memcpy(buffer + base_len, nonce_str, nonce_len);
+            buffer[base_len + nonce_len] = '\0';
+        }
+        
         sha1_string(buffer, hash);
-        if (memcmp(hash, job->target, 20) == 0) {
+        
+        // So sánh nhanh 20 byte
+        if (*(uint64_t*)hash == *(uint64_t*)target &&
+            *(uint64_t*)(hash + 8) == *(uint64_t*)(target + 8) &&
+            *(uint32_t*)(hash + 16) == *(uint32_t*)(target + 16)) {
             clock_gettime(CLOCK_MONOTONIC, &end);
             *elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
                           (end.tv_nsec - start.tv_nsec) / 1e6;
@@ -129,8 +155,19 @@ long long solve_job(const Job *job, double *elapsed_ms) {
     return -1;
 }
 
-// Prototype cho format_hashrate
-const char* format_hashrate(double h);
+// Hàm định dạng hashrate
+static inline const char* format_hashrate(double h) {
+    static char buf[64];
+    if (h >= 1e9)
+        snprintf(buf, sizeof(buf), "%.2f GH/s", h / 1e9);
+    else if (h >= 1e6)
+        snprintf(buf, sizeof(buf), "%.2f MH/s", h / 1e6);
+    else if (h >= 1e3)
+        snprintf(buf, sizeof(buf), "%.2f kH/s", h / 1e3);
+    else
+        snprintf(buf, sizeof(buf), "%.2f H/s", h);
+    return buf;
+}
 
 // -------------------- Worker thread --------------------
 typedef struct {
@@ -145,7 +182,7 @@ void *worker_thread(void *arg) {
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
 
-    while (1) {
+    while (g_running) {
         // Lấy pool
         PoolInfo pool;
         if (!get_pool(&pool)) {
@@ -155,30 +192,35 @@ void *worker_thread(void *arg) {
         }
         printf("[worker%d] Kết nối tới %s:%d\n", id, pool.ip, pool.port);
 
-        // Tạo socket
+        // Tạo socket với timeout
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
-            perror("[worker%d] socket");
             sleep(3);
             continue;
         }
+        
+        // Set timeout
+        struct timeval tv;
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
         addr.sin_port = htons(pool.port);
         if (inet_pton(AF_INET, pool.ip, &addr.sin_addr) <= 0) {
-            perror("[worker%d] inet_pton");
             close(sock);
             sleep(3);
             continue;
         }
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            perror("[worker%d] connect");
             close(sock);
             sleep(3);
             continue;
         }
 
-        // Đọc dòng server version
+        // Đọc server version
         char buf[1024];
         int n = recv(sock, buf, sizeof(buf)-1, 0);
         if (n <= 0) {
@@ -192,9 +234,10 @@ void *worker_thread(void *arg) {
 
         int accepted = 0, rejected = 0;
         time_t t0 = time(NULL);
+        time_t last_stats = t0;
 
-        // Vòng lặp nhận job và xử lý
-        while (1) {
+        // Vòng lặp nhận job
+        while (g_running) {
             // Gửi yêu cầu job
             char req[256];
             snprintf(req, sizeof(req), "JOB,%s,%s,%s\n",
@@ -205,11 +248,10 @@ void *worker_thread(void *arg) {
             n = recv(sock, buf, sizeof(buf)-1, 0);
             if (n <= 0) break;
             buf[n] = '\0';
-            // Xóa ký tự xuống dòng
+            
             char *newline = strchr(buf, '\n');
             if (newline) *newline = '\0';
 
-            // Parse job: base,target_hex,diff
             char *base = strtok(buf, ",");
             char *target_hex = strtok(NULL, ",");
             char *diff_str = strtok(NULL, ",");
@@ -217,8 +259,7 @@ void *worker_thread(void *arg) {
 
             Job job;
             strcpy(job.base, base);
-            // Giải mã target_hex thành 20 byte
-            if (strlen(target_hex) != 40) continue; // SHA1 hex = 40 ký tự
+            if (strlen(target_hex) != 40) continue;
             for (int i = 0; i < 20; i++) {
                 sscanf(target_hex + i*2, "%2hhx", &job.target[i]);
             }
@@ -228,13 +269,12 @@ void *worker_thread(void *arg) {
             double elapsed_ms;
             long long nonce = solve_job(&job, &elapsed_ms);
             if (nonce >= 0) {
-                double hashrate = 1e6 * nonce / (elapsed_ms * 1000.0); // H/s
+                double hashrate = 1e6 * nonce / (elapsed_ms * 1000.0);
                 char msg[256];
-                snprintf(msg, sizeof(msg), "%lld,%.2f,RustMiner,%s,%u\n",
+                snprintf(msg, sizeof(msg), "%lld,%.2f,CMiner,%s,%u\n",
                          nonce, hashrate, cfg.rig_identifier, mtid);
                 if (send(sock, msg, strlen(msg), 0) < 0) break;
 
-                // Nhận feedback
                 n = recv(sock, buf, sizeof(buf)-1, 0);
                 if (n <= 0) break;
                 buf[n] = '\0';
@@ -243,51 +283,42 @@ void *worker_thread(void *arg) {
 
                 if (strcmp(fb, "GOOD") == 0) {
                     accepted++;
-                    printf("[worker%d] ✅ Share accepted | %s | %d\n",
+                    printf("[worker%d] ✅ Share accepted | %s | Total: %d\n",
                            id, format_hashrate(hashrate), accepted);
                 } else if (strncmp(fb, "BAD,", 4) == 0) {
                     rejected++;
                     printf("[worker%d] ❌ Rejected: %s (rej=%d)\n",
                            id, fb+4, rejected);
                 } else if (strcmp(fb, "BLOCK") == 0) {
-                    printf("[worker%d] ⛓️ New block\n", id);
-                } else {
-                    printf("[worker%d] ℹ️ %s\n", id, fb);
+                    printf("[worker%d] ⛓️ New block found!\n", id);
                 }
 
-                // In thống kê mỗi 10 share
-                if ((accepted + rejected) % 10 == 0) {
-                    time_t now = time(NULL);
+                // In stats mỗi 30 giây
+                time_t now = time(NULL);
+                if (now - last_stats >= 30) {
                     double uptime = difftime(now, t0);
-                    printf("[worker%d] 📊 Shares: %d good / %d bad | Uptime %.1fs\n",
-                           id, accepted, rejected, uptime);
-                    t0 = now;
+                    printf("[worker%d] 📊 Stats: %d good / %d bad | Uptime: %.0fs | Accept rate: %.1f%%\n",
+                           id, accepted, rejected, uptime,
+                           accepted + rejected > 0 ? (accepted * 100.0 / (accepted + rejected)) : 0);
+                    last_stats = now;
                 }
             }
         }
         close(sock);
-        fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, kết nối lại...\n", id);
-        sleep(2);
+        if (g_running) {
+            fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, kết nối lại...\n", id);
+            sleep(2);
+        }
     }
     return NULL;
 }
 
-// Hàm định dạng hashrate
-const char* format_hashrate(double h) {
-    static char buf[64];
-    if (h >= 1e9)
-        snprintf(buf, sizeof(buf), "%.2f GH/s", h / 1e9);
-    else if (h >= 1e6)
-        snprintf(buf, sizeof(buf), "%.2f MH/s", h / 1e6);
-    else if (h >= 1e3)
-        snprintf(buf, sizeof(buf), "%.2f kH/s", h / 1e3);
-    else
-        snprintf(buf, sizeof(buf), "%.2f H/s", h);
-    return buf;
-}
-
 // -------------------- Main --------------------
 int main() {
+    // Cài đặt signal handler
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
     Config cfg;
     if (!read_config("config.txt", &cfg)) {
         fprintf(stderr, "Không đọc được config.txt, dùng mặc định\n");
@@ -297,15 +328,22 @@ int main() {
         strcpy(cfg.rig_identifier, "RustRig");
         cfg.thread_count = 4;
     }
+    
+    // Giới hạn thread count hợp lý
+    if (cfg.thread_count < 1) cfg.thread_count = 1;
+    if (cfg.thread_count > 16) cfg.thread_count = 16;
 
-    printf("Duino-Coin C Miner\n");
-    printf("Username: %s\n", cfg.username);
+    printf("\n========================================\n");
+    printf("   🦀 Duino-Coin C Miner v2.0\n");
+    printf("========================================\n");
+    printf("Username:   %s\n", cfg.username);
     printf("Difficulty: %s\n", cfg.difficulty);
-    printf("Rig: %s\n", cfg.rig_identifier);
-    printf("Threads: %d\n", cfg.thread_count);
+    printf("Rig:        %s\n", cfg.rig_identifier);
+    printf("Threads:    %d\n", cfg.thread_count);
+    printf("========================================\n\n");
 
     srand(time(NULL));
-    unsigned int mtid = rand() % 90000 + 10000; // giống Rust: 10000-99999
+    unsigned int mtid = rand() % 90000 + 10000;
 
     pthread_t threads[cfg.thread_count];
     WorkerArgs args[cfg.thread_count];
@@ -317,8 +355,12 @@ int main() {
         pthread_create(&threads[i], NULL, worker_thread, &args[i]);
     }
 
+    printf("✅ Miner started! Press Ctrl+C to stop.\n\n");
+
     for (int i = 0; i < cfg.thread_count; i++) {
         pthread_join(threads[i], NULL);
     }
+    
+    printf("\n🛑 Miner stopped. Goodbye!\n");
     return 0;
 }
