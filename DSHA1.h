@@ -1,218 +1,248 @@
-#ifndef DSHA1_H
-#define DSHA1_H
+#ifndef SHA1_H
+#define SHA1_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DSHA1_OUTPUT_SIZE 20
+#define SHA1_SIZE 20
+#define SHA1_SIZE_FORMATTED 41
 
 typedef struct {
     uint32_t h[5];
-    uint8_t buf[64];
     uint64_t len;
-} DSHA1_CTX;
+    uint8_t buf[64];
+    uint32_t buf_len;
+} sha1_ctx;
 
-// ============== FORCE INLINE ==============
+// Force inline macros
 #if defined(__GNUC__) || defined(__clang__)
-    #define ALWAYS_INLINE __attribute__((always_inline)) inline
-    #define RESTRICT __restrict
-    #define LIKELY(x)   __builtin_expect(!!(x), 1)
-    #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+    #define SHA1_INLINE __attribute__((always_inline)) static inline
+    #define SHA1_RESTRICT __restrict
+    #define SHA1_LIKELY(x) __builtin_expect(!!(x), 1)
+    #define SHA1_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-    #define ALWAYS_INLINE inline
-    #define RESTRICT
-    #define LIKELY(x)   (x)
-    #define UNLIKELY(x) (x)
+    #define SHA1_INLINE static inline
+    #define SHA1_RESTRICT
+    #define SHA1_LIKELY(x) (x)
+    #define SHA1_UNLIKELY(x) (x)
 #endif
 
-// ============== ENDIANNESS (FASTEST POSSIBLE) ==============
+// Byte swap for little-endian
 #if defined(__ARM_NEON__) || defined(__aarch64__)
-    static ALWAYS_INLINE uint32_t bswap32(uint32_t x) {
+    SHA1_INLINE uint32_t sha1_bswap32(uint32_t x) {
         uint32_t y;
         __asm__("rev %0, %1" : "=r"(y) : "r"(x));
         return y;
     }
-    static ALWAYS_INLINE uint64_t bswap64(uint64_t x) {
-        uint64_t y;
-        __asm__("rev %0, %1" : "=r"(y) : "r"(x));
-        return y;
-    }
 #elif defined(__i386__) || defined(__x86_64__)
-    static ALWAYS_INLINE uint32_t bswap32(uint32_t x) {
-        __asm__("bswap %0" : "=r"(x) : "0"(x));
-        return x;
-    }
-    static ALWAYS_INLINE uint64_t bswap64(uint64_t x) {
+    SHA1_INLINE uint32_t sha1_bswap32(uint32_t x) {
         __asm__("bswap %0" : "=r"(x) : "0"(x));
         return x;
     }
 #else
-    static ALWAYS_INLINE uint32_t bswap32(uint32_t x) {
+    SHA1_INLINE uint32_t sha1_bswap32(uint32_t x) {
         return __builtin_bswap32(x);
-    }
-    static ALWAYS_INLINE uint64_t bswap64(uint64_t x) {
-        return __builtin_bswap64(x);
     }
 #endif
 
-// ============== LOAD/STORE WITH PREFETCH ==============
-static ALWAYS_INLINE uint32_t LOAD32(const uint8_t* RESTRICT p) {
+// Load/Store with builtins
+SHA1_INLINE uint32_t sha1_load32(const uint8_t* SHA1_RESTRICT p) {
     uint32_t v;
     __builtin_memcpy(&v, p, 4);
-    return bswap32(v);
+    return sha1_bswap32(v);
 }
 
-static ALWAYS_INLINE void STORE32(uint8_t* RESTRICT p, uint32_t v) {
-    v = bswap32(v);
+SHA1_INLINE void sha1_store32(uint8_t* SHA1_RESTRICT p, uint32_t v) {
+    v = sha1_bswap32(v);
     __builtin_memcpy(p, &v, 4);
 }
 
-static ALWAYS_INLINE void STORE64(uint8_t* RESTRICT p, uint64_t v) {
-    v = bswap64(v);
-    __builtin_memcpy(p, &v, 8);
-}
-
-// ============== SHA-1 CORE MACROS (RUST-STYLE) ==============
-#define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
-
-#define CH(x, y, z)  ((z) ^ ((x) & ((y) ^ (z))))
-#define PARITY(x, y, z) ((x) ^ (y) ^ (z))
-#define MAJ(x, y, z) (((x) & (y)) | ((z) & ((x) | (y))))
+// SHA-1 core macros
+#define SHA1_ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define SHA1_CH(x, y, z) ((z) ^ ((x) & ((y) ^ (z))))
+#define SHA1_PARITY(x, y, z) ((x) ^ (y) ^ (z))
+#define SHA1_MAJ(x, y, z) (((x) & (y)) | ((z) & ((x) | (y))))
 
 #define K0 0x5A827999UL
 #define K1 0x6ED9EBA1UL
 #define K2 0x8F1BBCDCUL
 #define K3 0xCA62C1D6UL
 
-// ============== TRANSFORM - RUST-LEVEL OPTIMIZATION ==============
-static ALWAYS_INLINE void transform(uint32_t h[5], const uint8_t* RESTRICT blk) {
+// Optimized transform - fully unrolled loops
+static void sha1_transform(sha1_ctx* SHA1_RESTRICT ctx, const uint8_t* SHA1_RESTRICT block) {
     uint32_t a, b, c, d, e;
     uint32_t w[80];
     
-    // Load with vector-friendly pattern
+    // Load with prefetch
     for (int i = 0; i < 16; i++) {
-        w[i] = LOAD32(blk + (i << 2));
+        w[i] = sha1_load32(block + (i << 2));
     }
     
-    // Schedule expansion - unrolled for speed
+    // Schedule expansion - unrolled with pragma
     #pragma GCC unroll 4
     for (int i = 16; i < 80; i++) {
-        w[i] = ROTL(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+        w[i] = SHA1_ROTL(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
     }
     
-    a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
+    a = ctx->h[0]; b = ctx->h[1]; c = ctx->h[2]; d = ctx->h[3]; e = ctx->h[4];
     
     // Round 0-19
     #pragma GCC unroll 20
     for (int i = 0; i < 20; i++) {
-        uint32_t temp = ROTL(a, 5) + CH(b, c, d) + e + K0 + w[i];
-        e = d; d = c; c = ROTL(b, 30); b = a; a = temp;
+        uint32_t temp = SHA1_ROTL(a, 5) + SHA1_CH(b, c, d) + e + K0 + w[i];
+        e = d; d = c; c = SHA1_ROTL(b, 30); b = a; a = temp;
     }
     
     // Round 20-39
     #pragma GCC unroll 20
     for (int i = 20; i < 40; i++) {
-        uint32_t temp = ROTL(a, 5) + PARITY(b, c, d) + e + K1 + w[i];
-        e = d; d = c; c = ROTL(b, 30); b = a; a = temp;
+        uint32_t temp = SHA1_ROTL(a, 5) + SHA1_PARITY(b, c, d) + e + K1 + w[i];
+        e = d; d = c; c = SHA1_ROTL(b, 30); b = a; a = temp;
     }
     
     // Round 40-59
     #pragma GCC unroll 20
     for (int i = 40; i < 60; i++) {
-        uint32_t temp = ROTL(a, 5) + MAJ(b, c, d) + e + K2 + w[i];
-        e = d; d = c; c = ROTL(b, 30); b = a; a = temp;
+        uint32_t temp = SHA1_ROTL(a, 5) + SHA1_MAJ(b, c, d) + e + K2 + w[i];
+        e = d; d = c; c = SHA1_ROTL(b, 30); b = a; a = temp;
     }
     
     // Round 60-79
     #pragma GCC unroll 20
     for (int i = 60; i < 80; i++) {
-        uint32_t temp = ROTL(a, 5) + PARITY(b, c, d) + e + K3 + w[i];
-        e = d; d = c; c = ROTL(b, 30); b = a; a = temp;
+        uint32_t temp = SHA1_ROTL(a, 5) + SHA1_PARITY(b, c, d) + e + K3 + w[i];
+        e = d; d = c; c = SHA1_ROTL(b, 30); b = a; a = temp;
     }
     
-    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    ctx->h[0] += a; ctx->h[1] += b;
+    ctx->h[2] += c; ctx->h[3] += d;
+    ctx->h[4] += e;
 }
 
-// ============== PUBLIC API ==============
-static ALWAYS_INLINE void dsha1_init(DSHA1_CTX* RESTRICT ctx) {
+// Public API
+SHA1_INLINE void sha1_init(sha1_ctx* ctx) {
+    if (SHA1_UNLIKELY(!ctx)) return;
     ctx->h[0] = 0x67452301UL;
     ctx->h[1] = 0xEFCDAB89UL;
     ctx->h[2] = 0x98BADCFEUL;
     ctx->h[3] = 0x10325476UL;
     ctx->h[4] = 0xC3D2E1F0UL;
     ctx->len = 0;
+    ctx->buf_len = 0;
 }
 
-static ALWAYS_INLINE void dsha1_update(DSHA1_CTX* RESTRICT ctx, 
-                                        const uint8_t* RESTRICT data, 
-                                        size_t len) {
-    size_t i = ctx->len & 63;
-    ctx->len += len;
+SHA1_INLINE void sha1_update(sha1_ctx* SHA1_RESTRICT ctx, 
+                              const void* SHA1_RESTRICT data, 
+                              size_t len) {
+    if (SHA1_UNLIKELY(!ctx || (!data && len))) return;
     
-    if (LIKELY(i)) {
-        size_t n = 64 - i;
-        if (n > len) n = len;
-        __builtin_memcpy(ctx->buf + i, data, n);
-        data += n;
-        len -= n;
-        if (UNLIKELY(i + n == 64)) {
-            transform(ctx->h, ctx->buf);
+    const uint8_t* bytes = (const uint8_t*)data;
+    size_t processed = 0;
+    
+    while (processed < len) {
+        size_t remaining = len - processed;
+        
+        if (ctx->buf_len == 0 && remaining >= 64) {
+            // Fast path: process directly
+            sha1_transform(ctx, bytes + processed);
+            processed += 64;
+        } else {
+            // Slow path: use buffer
+            size_t space = 64 - ctx->buf_len;
+            size_t take = (remaining < space) ? remaining : space;
+            
+            __builtin_memcpy(ctx->buf + ctx->buf_len, bytes + processed, take);
+            ctx->buf_len += (uint32_t)take;
+            processed += take;
+            
+            if (ctx->buf_len == 64) {
+                sha1_transform(ctx, ctx->buf);
+                ctx->buf_len = 0;
+            }
         }
     }
     
-    while (LIKELY(len >= 64)) {
-        transform(ctx->h, data);
-        data += 64;
-        len -= 64;
-    }
-    
-    if (UNLIKELY(len)) {
-        __builtin_memcpy(ctx->buf, data, len);
-    }
+    ctx->len += len;
 }
 
-static ALWAYS_INLINE void dsha1_final(DSHA1_CTX* RESTRICT ctx, 
-                                       uint8_t hash[RESTRICT 20]) {
-    uint64_t bits = ctx->len << 3;
-    size_t i = ctx->len & 63;
-    
-    ctx->buf[i++] = 0x80;
-    
-    if (UNLIKELY(i > 56)) {
-        __builtin_memset(ctx->buf + i, 0, 64 - i);
-        transform(ctx->h, ctx->buf);
-        __builtin_memset(ctx->buf, 0, 56);
-    } else {
-        __builtin_memset(ctx->buf + i, 0, 56 - i);
+SHA1_INLINE void sha1_final(sha1_ctx* SHA1_RESTRICT ctx, 
+                             uint8_t SHA1_RESTRICT hash[SHA1_SIZE]) {
+    if (SHA1_UNLIKELY(!hash)) return;
+    if (SHA1_UNLIKELY(!ctx)) {
+        __builtin_memset(hash, 0, SHA1_SIZE);
+        return;
     }
     
-    STORE64(ctx->buf + 56, bits);
-    transform(ctx->h, ctx->buf);
+    uint64_t bit_len = ctx->len << 3;
+    uint32_t buf_len = ctx->buf_len;
     
-    STORE32(hash,      ctx->h[0]);
-    STORE32(hash + 4,  ctx->h[1]);
-    STORE32(hash + 8,  ctx->h[2]);
-    STORE32(hash + 12, ctx->h[3]);
-    STORE32(hash + 16, ctx->h[4]);
+    // Add padding
+    ctx->buf[buf_len++] = 0x80;
+    
+    if (buf_len > 56) {
+        __builtin_memset(ctx->buf + buf_len, 0, 64 - buf_len);
+        sha1_transform(ctx, ctx->buf);
+        buf_len = 0;
+    }
+    
+    __builtin_memset(ctx->buf + buf_len, 0, 56 - buf_len);
+    
+    // Add length in bits (big-endian)
+    uint32_t len_hi = (uint32_t)(bit_len >> 32);
+    uint32_t len_lo = (uint32_t)(bit_len & 0xFFFFFFFF);
+    
+    ctx->buf[56] = (uint8_t)(len_hi >> 24);
+    ctx->buf[57] = (uint8_t)(len_hi >> 16);
+    ctx->buf[58] = (uint8_t)(len_hi >> 8);
+    ctx->buf[59] = (uint8_t)(len_hi);
+    ctx->buf[60] = (uint8_t)(len_lo >> 24);
+    ctx->buf[61] = (uint8_t)(len_lo >> 16);
+    ctx->buf[62] = (uint8_t)(len_lo >> 8);
+    ctx->buf[63] = (uint8_t)(len_lo);
+    
+    sha1_transform(ctx, ctx->buf);
+    
+    // Store hash
+    sha1_store32(hash,      ctx->h[0]);
+    sha1_store32(hash + 4,  ctx->h[1]);
+    sha1_store32(hash + 8,  ctx->h[2]);
+    sha1_store32(hash + 12, ctx->h[3]);
+    sha1_store32(hash + 16, ctx->h[4]);
 }
 
-static ALWAYS_INLINE void dsha1_reset(DSHA1_CTX* RESTRICT ctx) {
-    dsha1_init(ctx);
+SHA1_INLINE void sha1(uint8_t hash[SHA1_SIZE], const void* data, size_t len) {
+    sha1_ctx ctx;
+    sha1_init(&ctx);
+    sha1_update(&ctx, data, len);
+    sha1_final(&ctx, hash);
 }
 
-static ALWAYS_INLINE void dsha1_warmup(DSHA1_CTX* RESTRICT ctx) {
-    uint8_t tmp[20];
-    dsha1_update(ctx, (const uint8_t*)"warmupwarmupwa", 20);
-    dsha1_final(ctx, tmp);
+SHA1_INLINE void sha1_format(char* dst, size_t dst_cap, const uint8_t* hash) {
+    if (!dst || dst_cap < SHA1_SIZE_FORMATTED) {
+        if (dst && dst_cap) *dst = 0;
+        return;
+    }
+    
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < SHA1_SIZE; i++) {
+        dst[i*2]     = hex[(hash[i] >> 4) & 0xF];
+        dst[i*2 + 1] = hex[hash[i] & 0xF];
+    }
+    dst[SHA1_SIZE_FORMATTED - 1] = '\0';
 }
+
+#undef SHA1_INLINE
+#undef SHA1_RESTRICT
+#undef SHA1_LIKELY
+#undef SHA1_UNLIKELY
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif // SHA1_H
