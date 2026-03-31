@@ -129,6 +129,9 @@ long long solve_job(const Job *job, double *elapsed_ms) {
     return -1;
 }
 
+// Prototype cho format_hashrate
+const char* format_hashrate(double h);
+
 // -------------------- Worker thread --------------------
 typedef struct {
     int id;
