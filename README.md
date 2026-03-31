@@ -234,10 +234,7 @@ limitations under the License.
 📧 Contact & Support
 
 · Issues: GitHub Issues
-· Discord: Join the Duino-Coin Discord
-· Documentation: Duino-Coin Docs
-
----
+· Discord: Join the Duino-Coin Discord[https://discord.gg/duino-coin-677615191793467402]
 
 <div align="center">⭐ Star this repository if you find it useful!
 
