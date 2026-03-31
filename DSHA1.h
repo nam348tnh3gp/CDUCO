@@ -43,7 +43,7 @@ typedef struct {
     #define DSHA1_BSWAP64(x) dsha1_bswap64(x)
 #endif
 
-// ============== ALIGNMENT-SAFE ==============
+// ============== ALIGNMENT-SAFE I/O ==============
 static inline uint32_t dsha1_load_be32(const uint8_t *p) {
     uint32_t v;
     memcpy(&v, p, 4);
@@ -60,7 +60,7 @@ static inline void dsha1_store_be64(uint8_t *p, uint64_t v) {
     memcpy(p, &tmp, 8);
 }
 
-// ============== SHA-1 CORE ==============
+// ============== SHA-1 CORE FUNCTIONS ==============
 #define DSHA1_ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 
 static inline uint32_t dsha1_f1(uint32_t b, uint32_t c, uint32_t d) {
@@ -79,10 +79,11 @@ static inline uint32_t dsha1_f3(uint32_t b, uint32_t c, uint32_t d) {
 static inline void dsha1_transform(uint32_t state[5], const uint8_t *block) {
     uint32_t a, b, c, d, e;
     uint32_t w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15;
-    uint32_t w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26, w27, w28, w29, w30, w31;
-    uint32_t w32, w33, w34, w35, w36, w37, w38, w39, w40, w41, w42, w43, w44, w45, w46, w47;
-    uint32_t w48, w49, w50, w51, w52, w53, w54, w55, w56, w57, w58, w59, w60, w61, w62, w63;
-    uint32_t w64, w65, w66, w67, w68, w69, w70, w71, w72, w73, w74, w75, w76, w77, w78, w79;
+    uint32_t w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26, w27, w28, w29;
+    uint32_t w30, w31, w32, w33, w34, w35, w36, w37, w38, w39, w40, w41, w42, w43;
+    uint32_t w44, w45, w46, w47, w48, w49, w50, w51, w52, w53, w54, w55, w56, w57;
+    uint32_t w58, w59, w60, w61, w62, w63, w64, w65, w66, w67, w68, w69, w70, w71;
+    uint32_t w72, w73, w74, w75, w76, w77, w78, w79;
     
     a = state[0];
     b = state[1];
@@ -108,7 +109,7 @@ static inline void dsha1_transform(uint32_t state[5], const uint8_t *block) {
     w14 = dsha1_load_be32(block + 56);
     w15 = dsha1_load_be32(block + 60);
     
-    // Expand 16 -> 80 (fully unrolled)
+    // Expand 16 -> 80
     w16 = DSHA1_ROTL32(w13 ^ w8 ^ w2 ^ w0, 1);
     w17 = DSHA1_ROTL32(w14 ^ w9 ^ w3 ^ w1, 1);
     w18 = DSHA1_ROTL32(w15 ^ w10 ^ w4 ^ w2, 1);
@@ -175,79 +176,75 @@ static inline void dsha1_transform(uint32_t state[5], const uint8_t *block) {
     w79 = DSHA1_ROTL32(w76 ^ w71 ^ w65 ^ w63, 1);
     
     // Round 0-19 (K1 = 0x5A827999)
-    #define R1(x, y, z, k, wval) \
-        do { \
-            uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f1(b, c, d) + e + (k) + (wval); \
-            e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
-        } while(0)
+    #define ROUND1(k, w) do { \
+        uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f1(b, c, d) + e + (k) + (w); \
+        e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
+    } while(0)
     
-    R1(a, b, c, d, 0x5A827999UL, w0); R1(e, a, b, c, 0x5A827999UL, w1);
-    R1(d, e, a, b, 0x5A827999UL, w2); R1(c, d, e, a, 0x5A827999UL, w3);
-    R1(b, c, d, e, 0x5A827999UL, w4); R1(a, b, c, d, 0x5A827999UL, w5);
-    R1(e, a, b, c, 0x5A827999UL, w6); R1(d, e, a, b, 0x5A827999UL, w7);
-    R1(c, d, e, a, 0x5A827999UL, w8); R1(b, c, d, e, 0x5A827999UL, w9);
-    R1(a, b, c, d, 0x5A827999UL, w10); R1(e, a, b, c, 0x5A827999UL, w11);
-    R1(d, e, a, b, 0x5A827999UL, w12); R1(c, d, e, a, 0x5A827999UL, w13);
-    R1(b, c, d, e, 0x5A827999UL, w14); R1(a, b, c, d, 0x5A827999UL, w15);
-    R1(e, a, b, c, 0x5A827999UL, w16); R1(d, e, a, b, 0x5A827999UL, w17);
-    R1(c, d, e, a, 0x5A827999UL, w18); R1(b, c, d, e, 0x5A827999UL, w19);
+    ROUND1(0x5A827999UL, w0); ROUND1(0x5A827999UL, w1);
+    ROUND1(0x5A827999UL, w2); ROUND1(0x5A827999UL, w3);
+    ROUND1(0x5A827999UL, w4); ROUND1(0x5A827999UL, w5);
+    ROUND1(0x5A827999UL, w6); ROUND1(0x5A827999UL, w7);
+    ROUND1(0x5A827999UL, w8); ROUND1(0x5A827999UL, w9);
+    ROUND1(0x5A827999UL, w10); ROUND1(0x5A827999UL, w11);
+    ROUND1(0x5A827999UL, w12); ROUND1(0x5A827999UL, w13);
+    ROUND1(0x5A827999UL, w14); ROUND1(0x5A827999UL, w15);
+    ROUND1(0x5A827999UL, w16); ROUND1(0x5A827999UL, w17);
+    ROUND1(0x5A827999UL, w18); ROUND1(0x5A827999UL, w19);
     
     // Round 20-39 (K2 = 0x6ED9EBA1)
-    #undef R1
-    #define R2(x, y, z, k, wval) \
-        do { \
-            uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f2(b, c, d) + e + (k) + (wval); \
-            e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
-        } while(0)
+    #undef ROUND1
+    #define ROUND2(k, w) do { \
+        uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f2(b, c, d) + e + (k) + (w); \
+        e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
+    } while(0)
     
-    R2(a, b, c, d, 0x6ED9EBA1UL, w20); R2(e, a, b, c, 0x6ED9EBA1UL, w21);
-    R2(d, e, a, b, 0x6ED9EBA1UL, w22); R2(c, d, e, a, 0x6ED9EBA1UL, w23);
-    R2(b, c, d, e, 0x6ED9EBA1UL, w24); R2(a, b, c, d, 0x6ED9EBA1UL, w25);
-    R2(e, a, b, c, 0x6ED9EBA1UL, w26); R2(d, e, a, b, 0x6ED9EBA1UL, w27);
-    R2(c, d, e, a, 0x6ED9EBA1UL, w28); R2(b, c, d, e, 0x6ED9EBA1UL, w29);
-    R2(a, b, c, d, 0x6ED9EBA1UL, w30); R2(e, a, b, c, 0x6ED9EBA1UL, w31);
-    R2(d, e, a, b, 0x6ED9EBA1UL, w32); R2(c, d, e, a, 0x6ED9EBA1UL, w33);
-    R2(b, c, d, e, 0x6ED9EBA1UL, w34); R2(a, b, c, d, 0x6ED9EBA1UL, w35);
-    R2(e, a, b, c, 0x6ED9EBA1UL, w36); R2(d, e, a, b, 0x6ED9EBA1UL, w37);
-    R2(c, d, e, a, 0x6ED9EBA1UL, w38); R2(b, c, d, e, 0x6ED9EBA1UL, w39);
+    ROUND2(0x6ED9EBA1UL, w20); ROUND2(0x6ED9EBA1UL, w21);
+    ROUND2(0x6ED9EBA1UL, w22); ROUND2(0x6ED9EBA1UL, w23);
+    ROUND2(0x6ED9EBA1UL, w24); ROUND2(0x6ED9EBA1UL, w25);
+    ROUND2(0x6ED9EBA1UL, w26); ROUND2(0x6ED9EBA1UL, w27);
+    ROUND2(0x6ED9EBA1UL, w28); ROUND2(0x6ED9EBA1UL, w29);
+    ROUND2(0x6ED9EBA1UL, w30); ROUND2(0x6ED9EBA1UL, w31);
+    ROUND2(0x6ED9EBA1UL, w32); ROUND2(0x6ED9EBA1UL, w33);
+    ROUND2(0x6ED9EBA1UL, w34); ROUND2(0x6ED9EBA1UL, w35);
+    ROUND2(0x6ED9EBA1UL, w36); ROUND2(0x6ED9EBA1UL, w37);
+    ROUND2(0x6ED9EBA1UL, w38); ROUND2(0x6ED9EBA1UL, w39);
     
     // Round 40-59 (K3 = 0x8F1BBCDC)
-    #undef R2
-    #define R3(x, y, z, k, wval) \
-        do { \
-            uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f3(b, c, d) + e + (k) + (wval); \
-            e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
-        } while(0)
+    #undef ROUND2
+    #define ROUND3(k, w) do { \
+        uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f3(b, c, d) + e + (k) + (w); \
+        e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
+    } while(0)
     
-    R3(a, b, c, d, 0x8F1BBCDCUL, w40); R3(e, a, b, c, 0x8F1BBCDCUL, w41);
-    R3(d, e, a, b, 0x8F1BBCDCUL, w42); R3(c, d, e, a, 0x8F1BBCDCUL, w43);
-    R3(b, c, d, e, 0x8F1BBCDCUL, w44); R3(a, b, c, d, 0x8F1BBCDCUL, w45);
-    R3(e, a, b, c, 0x8F1BBCDCUL, w46); R3(d, e, a, b, 0x8F1BBCDCUL, w47);
-    R3(c, d, e, a, 0x8F1BBCDCUL, w48); R3(b, c, d, e, 0x8F1BBCDCUL, w49);
-    R3(a, b, c, d, 0x8F1BBCDCUL, w50); R3(e, a, b, c, 0x8F1BBCDCUL, w51);
-    R3(d, e, a, b, 0x8F1BBCDCUL, w52); R3(c, d, e, a, 0x8F1BBCDCUL, w53);
-    R3(b, c, d, e, 0x8F1BBCDCUL, w54); R3(a, b, c, d, 0x8F1BBCDCUL, w55);
-    R3(e, a, b, c, 0x8F1BBCDCUL, w56); R3(d, e, a, b, 0x8F1BBCDCUL, w57);
-    R3(c, d, e, a, 0x8F1BBCDCUL, w58); R3(b, c, d, e, 0x8F1BBCDCUL, w59);
+    ROUND3(0x8F1BBCDCUL, w40); ROUND3(0x8F1BBCDCUL, w41);
+    ROUND3(0x8F1BBCDCUL, w42); ROUND3(0x8F1BBCDCUL, w43);
+    ROUND3(0x8F1BBCDCUL, w44); ROUND3(0x8F1BBCDCUL, w45);
+    ROUND3(0x8F1BBCDCUL, w46); ROUND3(0x8F1BBCDCUL, w47);
+    ROUND3(0x8F1BBCDCUL, w48); ROUND3(0x8F1BBCDCUL, w49);
+    ROUND3(0x8F1BBCDCUL, w50); ROUND3(0x8F1BBCDCUL, w51);
+    ROUND3(0x8F1BBCDCUL, w52); ROUND3(0x8F1BBCDCUL, w53);
+    ROUND3(0x8F1BBCDCUL, w54); ROUND3(0x8F1BBCDCUL, w55);
+    ROUND3(0x8F1BBCDCUL, w56); ROUND3(0x8F1BBCDCUL, w57);
+    ROUND3(0x8F1BBCDCUL, w58); ROUND3(0x8F1BBCDCUL, w59);
     
     // Round 60-79 (K4 = 0xCA62C1D6)
-    #undef R3
-    #define R4(x, y, z, k, wval) \
-        do { \
-            uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f2(b, c, d) + e + (k) + (wval); \
-            e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
-        } while(0)
+    #undef ROUND3
+    #define ROUND4(k, w) do { \
+        uint32_t temp = DSHA1_ROTL32(a, 5) + dsha1_f2(b, c, d) + e + (k) + (w); \
+        e = d; d = c; c = DSHA1_ROTL32(b, 30); b = a; a = temp; \
+    } while(0)
     
-    R4(a, b, c, d, 0xCA62C1D6UL, w60); R4(e, a, b, c, 0xCA62C1D6UL, w61);
-    R4(d, e, a, b, 0xCA62C1D6UL, w62); R4(c, d, e, a, 0xCA62C1D6UL, w63);
-    R4(b, c, d, e, 0xCA62C1D6UL, w64); R4(a, b, c, d, 0xCA62C1D6UL, w65);
-    R4(e, a, b, c, 0xCA62C1D6UL, w66); R4(d, e, a, b, 0xCA62C1D6UL, w67);
-    R4(c, d, e, a, 0xCA62C1D6UL, w68); R4(b, c, d, e, 0xCA62C1D6UL, w69);
-    R4(a, b, c, d, 0xCA62C1D6UL, w70); R4(e, a, b, c, 0xCA62C1D6UL, w71);
-    R4(d, e, a, b, 0xCA62C1D6UL, w72); R4(c, d, e, a, 0xCA62C1D6UL, w73);
-    R4(b, c, d, e, 0xCA62C1D6UL, w74); R4(a, b, c, d, 0xCA62C1D6UL, w75);
-    R4(e, a, b, c, 0xCA62C1D6UL, w76); R4(d, e, a, b, 0xCA62C1D6UL, w77);
-    R4(c, d, e, a, 0xCA62C1D6UL, w78); R4(b, c, d, e, 0xCA62C1D6UL, w79);
+    ROUND4(0xCA62C1D6UL, w60); ROUND4(0xCA62C1D6UL, w61);
+    ROUND4(0xCA62C1D6UL, w62); ROUND4(0xCA62C1D6UL, w63);
+    ROUND4(0xCA62C1D6UL, w64); ROUND4(0xCA62C1D6UL, w65);
+    ROUND4(0xCA62C1D6UL, w66); ROUND4(0xCA62C1D6UL, w67);
+    ROUND4(0xCA62C1D6UL, w68); ROUND4(0xCA62C1D6UL, w69);
+    ROUND4(0xCA62C1D6UL, w70); ROUND4(0xCA62C1D6UL, w71);
+    ROUND4(0xCA62C1D6UL, w72); ROUND4(0xCA62C1D6UL, w73);
+    ROUND4(0xCA62C1D6UL, w74); ROUND4(0xCA62C1D6UL, w75);
+    ROUND4(0xCA62C1D6UL, w76); ROUND4(0xCA62C1D6UL, w77);
+    ROUND4(0xCA62C1D6UL, w78); ROUND4(0xCA62C1D6UL, w79);
     
     state[0] += a;
     state[1] += b;
@@ -298,7 +295,6 @@ static inline void dsha1_update(DSHA1_CTX *ctx, const uint8_t *data, size_t len)
 static inline void dsha1_final(DSHA1_CTX *ctx, uint8_t hash[DSHA1_OUTPUT_SIZE]) {
     uint64_t bit_count = ctx->count << 3;
     size_t buffer_idx = ctx->count & 63;
-    size_t pad_len;
     
     ctx->buffer[buffer_idx] = 0x80;
     buffer_idx++;
