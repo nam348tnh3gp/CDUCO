@@ -20,23 +20,6 @@ typedef struct {
     int thread_count;
 } Config;
 
-// Danh sách pool dự phòng (fallback) - hỗ trợ HTTP/0.9
-typedef struct {
-    char ip[64];
-    int port;
-    char name[64];
-    int use_http09;  // 1 = cần flag --http0.9, 0 = bình thường
-} FallbackPool;
-
-static const FallbackPool FALLBACK_POOLS[] = {
-    {"203.86.195.49", 2850, "darkhunter-node-1", 1},
-    {"server.duinocoin.com", 2811, "official-server", 0},
-    {"eu-server.duinocoin.com", 2811, "eu-server", 0},
-    {"us-server.duinocoin.com", 2811, "us-server", 0},
-    {"asia-server.duinocoin.com", 2811, "asia-server", 0}
-};
-
-static const int FALLBACK_COUNT = sizeof(FALLBACK_POOLS) / sizeof(FALLBACK_POOLS[0]);
 static volatile int g_running = 1;
 
 void signal_handler(int sig) {
@@ -72,124 +55,79 @@ int read_config(const char *filename, Config *cfg) {
     return 1;
 }
 
-// -------------------- Lấy pool từ server (với fallback) --------------------
+// -------------------- Lấy pool từ server --------------------
 typedef struct {
     char ip[64];
     int port;
 } PoolInfo;
 
-// Hàm kiểm tra pool có hoạt động không - hỗ trợ HTTP/0.9
-int test_pool_connection(const char *ip, int port, int use_http09) {
-    char cmd[512];
-    char response[256];
-    FILE *fp;
-    
-    if (use_http09) {
-        // Dùng flag --http0.9 cho pool cũ
-        snprintf(cmd, sizeof(cmd), 
-                 "curl -s --http0.9 --max-time 3 -X POST -d \"MOTD\" http://%s:%d 2>/dev/null", 
-                 ip, port);
-    } else {
-        // Bình thường
-        snprintf(cmd, sizeof(cmd), 
-                 "curl -s --max-time 3 -X POST -d \"MOTD\" http://%s:%d 2>/dev/null", 
-                 ip, port);
-    }
-    
-    fp = popen(cmd, "r");
-    if (!fp) return 0;
-    
-    if (fgets(response, sizeof(response), fp) == NULL) {
-        pclose(fp);
-        return 0;
-    }
-    pclose(fp);
-    
-    // Xóa ký tự newline
-    char *p = response;
-    while (*p) {
-        if (*p == '\n' || *p == '\r') {
-            *p = '\0';
-            break;
-        }
-        p++;
-    }
-    
-    // Kiểm tra response có hợp lệ không (DUCO hoặc bất kỳ phản hồi nào)
-    return (strlen(response) > 0);
-}
-
 int get_pool(PoolInfo *pool) {
     FILE *fp;
     char buf[1024];
     
-    printf("🌐 Đang tìm pool tốt nhất...\n");
+    printf("🌐 Đang lấy pool từ server...\n");
     
-    // Thử lấy pool từ server chính
-    fp = popen("curl -s --max-time 5 https://server.duinocoin.com/getPool 2>/dev/null", "r");
-    if (fp) {
-        if (fgets(buf, sizeof(buf), fp)) {
-            pclose(fp);
-            
-            // Parse JSON response
-            char *ip_start = strstr(buf, "\"ip\":\"");
-            if (ip_start) {
-                ip_start += 6;
-                char *ip_end = strchr(ip_start, '"');
-                if (ip_end) {
-                    int len = ip_end - ip_start;
-                    if (len >= (int)sizeof(pool->ip)) len = sizeof(pool->ip) - 1;
-                    strncpy(pool->ip, ip_start, len);
-                    pool->ip[len] = '\0';
-                    
-                    char *port_start = strstr(buf, "\"port\":");
-                    if (port_start) {
-                        port_start += 7;
-                        pool->port = atoi(port_start);
-                        
-                        printf("✅ Lấy pool từ server chính: %s:%d\n", pool->ip, pool->port);
-                        
-                        // Kiểm tra pool (thử với HTTP/1.1 trước)
-                        if (test_pool_connection(pool->ip, pool->port, 0)) {
-                            printf("✅ Pool %s:%d hoạt động (HTTP/1.1)\n", pool->ip, pool->port);
-                            return 1;
-                        } else if (test_pool_connection(pool->ip, pool->port, 1)) {
-                            printf("✅ Pool %s:%d hoạt động (HTTP/0.9)\n", pool->ip, pool->port);
-                            return 1;
-                        } else {
-                            printf("⚠️ Pool %s:%d không phản hồi, thử fallback\n", pool->ip, pool->port);
-                        }
-                    }
-                }
-            }
-        } else {
-            pclose(fp);
-        }
+    // Dùng link getPool mới
+    fp = popen("curl -s --max-time 10 https://ducofaucet.nam348tnh.workers.dev/getPool 2>/dev/null", "r");
+    if (!fp) {
+        printf("❌ Không thể kết nối đến server getPool\n");
+        return 0;
     }
     
-    // Thử các fallback pools
-    printf("⚠️ Thử dùng fallback pools...\n");
-    for (int i = 0; i < FALLBACK_COUNT; i++) {
-        printf("  🔄 Thử pool %d: %s:%d (%s)\n", i+1, 
-               FALLBACK_POOLS[i].ip, FALLBACK_POOLS[i].port, FALLBACK_POOLS[i].name);
-        
-        if (test_pool_connection(FALLBACK_POOLS[i].ip, FALLBACK_POOLS[i].port, 
-                                  FALLBACK_POOLS[i].use_http09)) {
-            strcpy(pool->ip, FALLBACK_POOLS[i].ip);
-            pool->port = FALLBACK_POOLS[i].port;
-            printf("  ✅ Pool %s:%d hoạt động!\n", pool->ip, pool->port);
+    if (fgets(buf, sizeof(buf), fp) == NULL) {
+        pclose(fp);
+        printf("❌ Không nhận được dữ liệu từ server\n");
+        return 0;
+    }
+    pclose(fp);
+    
+    printf("📡 Response: %s\n", buf);
+    
+    // Parse JSON response
+    char *ip_start = strstr(buf, "\"ip\":\"");
+    if (!ip_start) {
+        printf("❌ Không tìm thấy IP trong response\n");
+        return 0;
+    }
+    
+    ip_start += 6;
+    char *ip_end = strchr(ip_start, '"');
+    if (!ip_end) {
+        printf("❌ Không tìm thấy kết thúc IP\n");
+        return 0;
+    }
+    
+    int len = ip_end - ip_start;
+    if (len >= (int)sizeof(pool->ip)) len = sizeof(pool->ip) - 1;
+    strncpy(pool->ip, ip_start, len);
+    pool->ip[len] = '\0';
+    
+    char *port_start = strstr(buf, "\"port\":");
+    if (!port_start) {
+        printf("❌ Không tìm thấy PORT trong response\n");
+        return 0;
+    }
+    
+    port_start += 7;
+    pool->port = atoi(port_start);
+    
+    // Lấy tên pool nếu có
+    char *name_start = strstr(buf, "\"name\":\"");
+    if (name_start) {
+        name_start += 8;
+        char *name_end = strchr(name_start, '"');
+        if (name_end) {
+            int name_len = name_end - name_start;
+            char pool_name[64];
+            if (name_len >= (int)sizeof(pool_name)) name_len = sizeof(pool_name) - 1;
+            strncpy(pool_name, name_start, name_len);
+            pool_name[name_len] = '\0';
+            printf("✅ Lấy pool thành công: %s:%d (%s)\n", pool->ip, pool->port, pool_name);
             return 1;
-        } else {
-            printf("  ❌ Pool %s:%d không phản hồi\n", 
-                   FALLBACK_POOLS[i].ip, FALLBACK_POOLS[i].port);
         }
-        sleep(1);
     }
     
-    // Last resort: dùng server chính mặc định
-    printf("⚠️ Dùng server mặc định: server.duinocoin.com:2811\n");
-    strcpy(pool->ip, "server.duinocoin.com");
-    pool->port = 2811;
+    printf("✅ Lấy pool thành công: %s:%d\n", pool->ip, pool->port);
     return 1;
 }
 
@@ -263,19 +201,10 @@ static inline const char* format_hashrate(double h) {
     return buf;
 }
 
-// Hàm gửi request qua curl - hỗ trợ HTTP/0.9
-static char* curl_request(const char *url, const char *data, char *response, size_t response_size, int use_http09) {
+// Hàm gửi request qua curl
+static char* curl_request(const char *url, const char *data, char *response, size_t response_size) {
     char cmd[1024];
-    
-    if (use_http09) {
-        snprintf(cmd, sizeof(cmd), 
-                 "curl -s --http0.9 --max-time 10 -X POST -d \"%s\" \"%s\" 2>/dev/null", 
-                 data, url);
-    } else {
-        snprintf(cmd, sizeof(cmd), 
-                 "curl -s --max-time 10 -X POST -d \"%s\" \"%s\" 2>/dev/null", 
-                 data, url);
-    }
+    snprintf(cmd, sizeof(cmd), "curl -s --max-time 10 -X POST -d \"%s\" \"%s\" 2>/dev/null", data, url);
     
     FILE *fp = popen(cmd, "r");
     if (!fp) return NULL;
@@ -286,15 +215,9 @@ static char* curl_request(const char *url, const char *data, char *response, siz
     }
     pclose(fp);
     
-    // Xóa ký tự newline và carriage return
-    char *p = response;
-    while (*p) {
-        if (*p == '\n' || *p == '\r') {
-            *p = '\0';
-            break;
-        }
-        p++;
-    }
+    // Xóa ký tự newline
+    char *newline = strchr(response, '\n');
+    if (newline) *newline = '\0';
     
     return response;
 }
@@ -304,7 +227,6 @@ typedef struct {
     int id;
     Config cfg;
     unsigned int multithread_id;
-    int use_http09;  // Có cần dùng HTTP/0.9 cho pool này không
 } WorkerArgs;
 
 void *worker_thread(void *arg) {
@@ -312,23 +234,15 @@ void *worker_thread(void *arg) {
     int id = args->id;
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
-    int use_http09 = args->use_http09;
 
     while (g_running) {
         PoolInfo pool;
         
-        // Thử lấy pool
+        // Lấy pool từ server
         if (!get_pool(&pool)) {
-            fprintf(stderr, "[worker%d] Không thể lấy pool, thử lại sau 10s\n", id);
+            fprintf(stderr, "[worker%d] ❌ Không lấy được pool, thử lại sau 10s\n", id);
             sleep(10);
             continue;
-        }
-        
-        // Kiểm tra xem pool có cần HTTP/0.9 không
-        int need_http09 = 0;
-        if (strcmp(pool.ip, "203.86.195.49") == 0 && pool.port == 2850) {
-            need_http09 = 1;
-            printf("[worker%d] 🔧 Pool %s:%d yêu cầu HTTP/0.9\n", id, pool.ip, pool.port);
         }
         
         char url[128];
@@ -346,7 +260,7 @@ void *worker_thread(void *arg) {
             char req[256];
             snprintf(req, sizeof(req), "JOB,%s,%s,%s", cfg.username, cfg.difficulty, cfg.mining_key);
             
-            if (!curl_request(url, req, response, sizeof(response), need_http09)) {
+            if (!curl_request(url, req, response, sizeof(response))) {
                 consecutive_failures++;
                 if (consecutive_failures >= 3) {
                     printf("[worker%d] ⚠️ Mất kết nối sau %d lần thất bại\n", id, consecutive_failures);
@@ -387,7 +301,7 @@ void *worker_thread(void *arg) {
                 snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,%u", 
                          nonce, hashrate, cfg.rig_identifier, mtid);
                 
-                if (curl_request(url, result, response, sizeof(response), need_http09)) {
+                if (curl_request(url, result, response, sizeof(response))) {
                     if (strcmp(response, "GOOD") == 0) {
                         accepted++;
                         printf("[worker%d] ✅ Share accepted | %s | Total: %d\n",
@@ -446,19 +360,14 @@ int main() {
     if (cfg.thread_count > 4) cfg.thread_count = 4;
 
     printf("\n========================================\n");
-    printf("   🦀 Duino-Coin C Miner v2.1 (HTTP/0.9 Support)\n");
+    printf("   🦀 Duino-Coin C Miner v2.0\n");
     printf("========================================\n");
     printf("Username:   %s\n", cfg.username);
     printf("Difficulty: %s\n", cfg.difficulty);
     printf("Rig:        %s\n", cfg.rig_identifier);
     printf("Threads:    %d\n", cfg.thread_count);
     printf("========================================\n");
-    printf("Fallback pools:\n");
-    for (int i = 0; i < FALLBACK_COUNT; i++) {
-        printf("  - %s:%d (%s)%s\n", 
-               FALLBACK_POOLS[i].ip, FALLBACK_POOLS[i].port, FALLBACK_POOLS[i].name,
-               FALLBACK_POOLS[i].use_http09 ? " [HTTP/0.9]" : "");
-    }
+    printf("GetPool URL: https://ducofaucet.nam348tnh.workers.dev/getPool\n");
     printf("========================================\n\n");
 
     srand(time(NULL));
@@ -471,7 +380,6 @@ int main() {
         args[i].id = i;
         args[i].cfg = cfg;
         args[i].multithread_id = mtid;
-        args[i].use_http09 = 0;
         pthread_create(&threads[i], NULL, worker_thread, &args[i]);
     }
 
