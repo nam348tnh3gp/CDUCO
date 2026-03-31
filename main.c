@@ -21,7 +21,6 @@ typedef struct {
     char difficulty[16];
     char rig_identifier[64];
     int thread_count;
-    int running;
 } Config;
 
 static volatile int g_running = 1;
@@ -118,14 +117,10 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
     char buffer[512];
     int base_len = strlen(job->base);
     
-    // Copy base một lần
     memcpy(buffer, job->base, base_len);
-    
-    // Cache target để so sánh nhanh
     const unsigned char *target = job->target;
     
     for (long long nonce = 0; nonce <= max_nonce; nonce++) {
-        // Tối ưu sprintf cho số nhỏ
         if (nonce < 10) {
             buffer[base_len] = '0' + nonce;
             buffer[base_len + 1] = '\0';
@@ -142,7 +137,6 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
         
         sha1_string(buffer, hash);
         
-        // So sánh nhanh 20 byte
         if (*(uint64_t*)hash == *(uint64_t*)target &&
             *(uint64_t*)(hash + 8) == *(uint64_t*)(target + 8) &&
             *(uint32_t*)(hash + 16) == *(uint32_t*)(target + 16)) {
@@ -183,7 +177,6 @@ void *worker_thread(void *arg) {
     unsigned int mtid = args->multithread_id;
 
     while (g_running) {
-        // Lấy pool
         PoolInfo pool;
         if (!get_pool(&pool)) {
             fprintf(stderr, "[worker%d] Không lấy được pool, thử lại sau 5s\n", id);
@@ -192,19 +185,11 @@ void *worker_thread(void *arg) {
         }
         printf("[worker%d] Kết nối tới %s:%d\n", id, pool.ip, pool.port);
 
-        // Tạo socket với timeout
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
             sleep(3);
             continue;
         }
-        
-        // Set timeout
-        struct timeval tv;
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
@@ -220,7 +205,6 @@ void *worker_thread(void *arg) {
             continue;
         }
 
-        // Đọc server version
         char buf[1024];
         int n = recv(sock, buf, sizeof(buf)-1, 0);
         if (n <= 0) {
@@ -236,15 +220,12 @@ void *worker_thread(void *arg) {
         time_t t0 = time(NULL);
         time_t last_stats = t0;
 
-        // Vòng lặp nhận job
         while (g_running) {
-            // Gửi yêu cầu job
             char req[256];
             snprintf(req, sizeof(req), "JOB,%s,%s,%s\n",
                      cfg.username, cfg.difficulty, cfg.mining_key);
             if (send(sock, req, strlen(req), 0) < 0) break;
 
-            // Nhận job
             n = recv(sock, buf, sizeof(buf)-1, 0);
             if (n <= 0) break;
             buf[n] = '\0';
@@ -265,7 +246,6 @@ void *worker_thread(void *arg) {
             }
             job.diff = atoi(diff_str);
 
-            // Giải bài toán
             double elapsed_ms;
             long long nonce = solve_job(&job, &elapsed_ms);
             if (nonce >= 0) {
@@ -293,7 +273,6 @@ void *worker_thread(void *arg) {
                     printf("[worker%d] ⛓️ New block found!\n", id);
                 }
 
-                // In stats mỗi 30 giây
                 time_t now = time(NULL);
                 if (now - last_stats >= 30) {
                     double uptime = difftime(now, t0);
@@ -315,7 +294,6 @@ void *worker_thread(void *arg) {
 
 // -------------------- Main --------------------
 int main() {
-    // Cài đặt signal handler
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
@@ -329,7 +307,6 @@ int main() {
         cfg.thread_count = 4;
     }
     
-    // Giới hạn thread count hợp lý
     if (cfg.thread_count < 1) cfg.thread_count = 1;
     if (cfg.thread_count > 16) cfg.thread_count = 16;
 
