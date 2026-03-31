@@ -6,6 +6,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <signal.h>
+#include <errno.h>
 
 // Sử dụng DSHA1.h C version
 #include "DSHA1.h"
@@ -18,6 +19,19 @@ typedef struct {
     char rig_identifier[64];
     int thread_count;
 } Config;
+
+// Pool dự phòng (fallback)
+typedef struct {
+    char ip[64];
+    int port;
+    char name[64];
+} FallbackPool;
+
+static const FallbackPool DEFAULT_POOL = {
+    .ip = "203.86.195.49",
+    .port = 2850,
+    .name = "darkhunter-node-1"
+};
 
 static volatile int g_running = 1;
 
@@ -54,37 +68,102 @@ int read_config(const char *filename, Config *cfg) {
     return 1;
 }
 
-// -------------------- Lấy pool từ server --------------------
+// -------------------- Lấy pool từ server (với fallback) --------------------
 typedef struct {
     char ip[64];
     int port;
 } PoolInfo;
 
-int get_pool(PoolInfo *pool) {
-    FILE *fp = popen("curl -s --max-time 5 https://server.duinocoin.com/getPool", "r");
+// Hàm kiểm tra pool có hoạt động không
+int test_pool_connection(const char *ip, int port) {
+    char cmd[256];
+    char response[64];
+    FILE *fp;
+    
+    snprintf(cmd, sizeof(cmd), "curl -s --max-time 3 -X POST -d \"MOTD\" http://%s:%d 2>/dev/null", ip, port);
+    fp = popen(cmd, "r");
     if (!fp) return 0;
-    char buf[256];
-    if (!fgets(buf, sizeof(buf), fp)) {
+    
+    if (fgets(response, sizeof(response), fp) == NULL) {
         pclose(fp);
         return 0;
     }
     pclose(fp);
     
-    char *ip_start = strstr(buf, "\"ip\":\"");
-    if (!ip_start) return 0;
-    ip_start += 6;
-    char *ip_end = strchr(ip_start, '"');
-    if (!ip_end) return 0;
-    int len = ip_end - ip_start;
-    if (len >= (int)sizeof(pool->ip)) len = sizeof(pool->ip) - 1;
-    strncpy(pool->ip, ip_start, len);
-    pool->ip[len] = '\0';
+    // Nếu nhận được phản hồi (bất kỳ) thì pool hoạt động
+    return (strlen(response) > 0);
+}
 
-    char *port_start = strstr(buf, "\"port\":");
-    if (!port_start) return 0;
-    port_start += 7;
-    pool->port = atoi(port_start);
-    return 1;
+int get_pool(PoolInfo *pool) {
+    FILE *fp;
+    char buf[512];
+    int use_fallback = 0;
+    
+    // Thử lấy pool từ server chính
+    fp = popen("curl -s --max-time 5 https://server.duinocoin.com/getPool 2>/dev/null", "r");
+    if (fp) {
+        if (fgets(buf, sizeof(buf), fp)) {
+            pclose(fp);
+            
+            // Parse JSON response
+            char *ip_start = strstr(buf, "\"ip\":\"");
+            if (ip_start) {
+                ip_start += 6;
+                char *ip_end = strchr(ip_start, '"');
+                if (ip_end) {
+                    int len = ip_end - ip_start;
+                    if (len >= (int)sizeof(pool->ip)) len = sizeof(pool->ip) - 1;
+                    strncpy(pool->ip, ip_start, len);
+                    pool->ip[len] = '\0';
+                    
+                    char *port_start = strstr(buf, "\"port\":");
+                    if (port_start) {
+                        port_start += 7;
+                        pool->port = atoi(port_start);
+                        
+                        // Kiểm tra pool có hoạt động không
+                        if (test_pool_connection(pool->ip, pool->port)) {
+                            printf("✅ Lấy pool thành công: %s:%d\n", pool->ip, pool->port);
+                            return 1;
+                        } else {
+                            printf("⚠️ Pool %s:%d không phản hồi, dùng fallback\n", pool->ip, pool->port);
+                            use_fallback = 1;
+                        }
+                    } else {
+                        use_fallback = 1;
+                    }
+                } else {
+                    use_fallback = 1;
+                }
+            } else {
+                use_fallback = 1;
+            }
+        } else {
+            pclose(fp);
+            use_fallback = 1;
+        }
+    } else {
+        use_fallback = 1;
+    }
+    
+    // Fallback sang pool dự phòng
+    if (use_fallback) {
+        printf("⚠️ Không lấy được pool từ server, dùng pool dự phòng: %s:%d\n", 
+               DEFAULT_POOL.ip, DEFAULT_POOL.port);
+        strcpy(pool->ip, DEFAULT_POOL.ip);
+        pool->port = DEFAULT_POOL.port;
+        
+        // Kiểm tra pool dự phòng
+        if (test_pool_connection(pool->ip, pool->port)) {
+            printf("✅ Pool dự phòng hoạt động: %s:%d\n", pool->ip, pool->port);
+            return 1;
+        } else {
+            printf("❌ Pool dự phòng cũng không hoạt động!\n");
+            return 0;
+        }
+    }
+    
+    return 0;
 }
 
 // -------------------- Hàm tính SHA1 sử dụng DSHA1 (C version) --------------------
@@ -133,7 +212,6 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
         
         sha1_string(buffer, hash);
         
-        // So sánh toàn bộ 20 bytes
         if (memcmp(hash, target, 20) == 0) {
             clock_gettime(CLOCK_MONOTONIC, &end);
             *elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
@@ -184,6 +262,7 @@ typedef struct {
     int id;
     Config cfg;
     unsigned int multithread_id;
+    int reconnect_count;
 } WorkerArgs;
 
 void *worker_thread(void *arg) {
@@ -191,25 +270,27 @@ void *worker_thread(void *arg) {
     int id = args->id;
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
+    int reconnect_count = args->reconnect_count;
 
     while (g_running) {
         PoolInfo pool;
+        
+        // Thử lấy pool (có fallback)
         if (!get_pool(&pool)) {
-            fprintf(stderr, "[worker%d] Không lấy được pool, thử lại sau 5s\n", id);
-            sleep(5);
+            fprintf(stderr, "[worker%d] Không thể kết nối bất kỳ pool nào, thử lại sau 10s\n", id);
+            sleep(10);
             continue;
         }
         
         char url[128];
         snprintf(url, sizeof(url), "http://%s:%d", pool.ip, pool.port);
-        printf("[worker%d] Kết nối tới %s\n", id, url);
+        printf("[worker%d] 🔌 Kết nối tới %s:%d\n", id, pool.ip, pool.port);
 
-        char buf[1024];
         char response[1024];
-        
         int accepted = 0, rejected = 0;
         time_t t0 = time(NULL);
         time_t last_stats = t0;
+        int consecutive_failures = 0;
 
         while (g_running) {
             // Gửi request JOB
@@ -217,15 +298,26 @@ void *worker_thread(void *arg) {
             snprintf(req, sizeof(req), "JOB,%s,%s,%s", cfg.username, cfg.difficulty, cfg.mining_key);
             
             if (!curl_request(url, req, response, sizeof(response))) {
-                break;
+                consecutive_failures++;
+                if (consecutive_failures >= 3) {
+                    printf("[worker%d] ⚠️ Mất kết nối sau %d lần thất bại\n", id, consecutive_failures);
+                    break;
+                }
+                sleep(1);
+                continue;
             }
+            
+            consecutive_failures = 0;
             
             // Parse response
             char *base = strtok(response, ",");
             char *target_hex = strtok(NULL, ",");
             char *diff_str = strtok(NULL, ",");
             
-            if (!base || !target_hex || !diff_str) continue;
+            if (!base || !target_hex || !diff_str) {
+                printf("[worker%d] ⚠️ Response lỗi: %s\n", id, response);
+                continue;
+            }
 
             Job job;
             strcpy(job.base, base);
@@ -257,25 +349,28 @@ void *worker_thread(void *arg) {
                                id, response+4, rejected);
                     } else if (strcmp(response, "BLOCK") == 0) {
                         printf("[worker%d] ⛓️ New block found!\n", id);
+                        accepted++;
                     }
                 } else {
+                    printf("[worker%d] ⚠️ Không gửi được kết quả\n", id);
                     break;
                 }
 
                 time_t now = time(NULL);
                 if (now - last_stats >= 30) {
                     double uptime = difftime(now, t0);
-                    printf("[worker%d] 📊 Stats: %d good / %d bad | Uptime: %.0fs | Accept rate: %.1f%%\n",
-                           id, accepted, rejected, uptime,
-                           accepted + rejected > 0 ? (accepted * 100.0 / (accepted + rejected)) : 0);
+                    double accept_rate = accepted + rejected > 0 ? 
+                                         (accepted * 100.0 / (accepted + rejected)) : 0;
+                    printf("[worker%d] 📊 Stats: %d good / %d bad | Uptime: %.0fs | Rate: %.1f%%\n",
+                           id, accepted, rejected, uptime, accept_rate);
                     last_stats = now;
                 }
             }
         }
         
         if (g_running) {
-            fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, kết nối lại...\n", id);
-            sleep(2);
+            fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, kết nối lại sau 3s...\n", id);
+            sleep(3);
         }
     }
     return NULL;
@@ -293,11 +388,11 @@ int main() {
         strcpy(cfg.mining_key, "258013");
         strcpy(cfg.difficulty, "LOW");
         strcpy(cfg.rig_identifier, "iPhoneRig");
-        cfg.thread_count = 2;  // Giảm thread cho iPhone
+        cfg.thread_count = 2;
     }
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
-    if (cfg.thread_count > 4) cfg.thread_count = 4;  // Giới hạn 4 threads cho iPhone
+    if (cfg.thread_count > 4) cfg.thread_count = 4;
 
     printf("\n========================================\n");
     printf("   🦀 Duino-Coin C Miner v2.0\n");
@@ -306,6 +401,8 @@ int main() {
     printf("Difficulty: %s\n", cfg.difficulty);
     printf("Rig:        %s\n", cfg.rig_identifier);
     printf("Threads:    %d\n", cfg.thread_count);
+    printf("========================================\n");
+    printf("Fallback pool: %s:%d\n", DEFAULT_POOL.ip, DEFAULT_POOL.port);
     printf("========================================\n\n");
 
     srand(time(NULL));
@@ -318,6 +415,7 @@ int main() {
         args[i].id = i;
         args[i].cfg = cfg;
         args[i].multithread_id = mtid;
+        args[i].reconnect_count = 0;
         pthread_create(&threads[i], NULL, worker_thread, &args[i]);
     }
 
