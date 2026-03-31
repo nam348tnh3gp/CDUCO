@@ -15,7 +15,7 @@ TARGET = ducominer
 
 all: $(TARGET)
 
-$(TARGET): main.c dsha1.h
+$(TARGET): main.c DSHA1.h
 	$(CC) $(CFLAGS) -o $(TARGET) main.c $(LDFLAGS)
 
 clean:
