@@ -12,7 +12,7 @@
 #include <ctype.h>
 #include <signal.h>
 
-#include "dsha1.h"
+#include "DSHA1.h"  // Sửa lại tên file cho đúng
 
 // -------------------- Cấu hình --------------------
 typedef struct {
@@ -93,10 +93,10 @@ int get_pool(PoolInfo *pool) {
 
 // -------------------- Hàm tính SHA1 sử dụng DSHA1 tối ưu --------------------
 static inline void sha1_string(const char *input, unsigned char *output) {
-    DSHA1 ctx;
+    DSHA1_CTX ctx;  // Đổi từ DSHA1 sang DSHA1_CTX
     dsha1_init(&ctx);
-    dsha1_write(&ctx, (const unsigned char*)input, strlen(input));
-    dsha1_finalize(&ctx, output);
+    dsha1_update(&ctx, (const unsigned char*)input, strlen(input));  // Đổi từ dsha1_write sang dsha1_update
+    dsha1_final(&ctx, output);  // Đổi từ dsha1_finalize sang dsha1_final
 }
 
 // -------------------- Giải job --------------------
@@ -137,9 +137,8 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
         
         sha1_string(buffer, hash);
         
-        if (*(uint64_t*)hash == *(uint64_t*)target &&
-            *(uint64_t*)(hash + 8) == *(uint64_t*)(target + 8) &&
-            *(uint32_t*)(hash + 16) == *(uint32_t*)(target + 16)) {
+        // So sánh toàn bộ 20 bytes
+        if (memcmp(hash, target, 20) == 0) {
             clock_gettime(CLOCK_MONOTONIC, &end);
             *elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
                           (end.tv_nsec - start.tv_nsec) / 1e6;
