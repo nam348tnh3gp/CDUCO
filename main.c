@@ -11,7 +11,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#include <openssl/sha.h>
+#include "dsha1.h"
 
 // -------------------- Cấu hình --------------------
 typedef struct {
@@ -58,7 +58,7 @@ typedef struct {
 } PoolInfo;
 
 int get_pool(PoolInfo *pool) {
-    // Dùng lệnh curl để lấy JSON (có thể dùng libcurl, nhưng đơn giản dùng popen)
+    // Dùng lệnh curl để lấy JSON
     FILE *fp = popen("curl -s https://server.duinocoin.com/getPool", "r");
     if (!fp) return 0;
     char buf[256];
@@ -85,12 +85,12 @@ int get_pool(PoolInfo *pool) {
     return 1;
 }
 
-// -------------------- Hàm tính SHA1 --------------------
+// -------------------- Hàm tính SHA1 sử dụng DSHA1 --------------------
 void sha1_string(const char *input, unsigned char *output) {
-    SHA_CTX ctx;
-    SHA1_Init(&ctx);
-    SHA1_Update(&ctx, input, strlen(input));
-    SHA1_Final(output, &ctx);
+    DSHA1 ctx;
+    dsha1_init(&ctx);
+    dsha1_write(&ctx, (const unsigned char*)input, strlen(input));
+    dsha1_finalize(&ctx, output);
 }
 
 // -------------------- Giải job --------------------
