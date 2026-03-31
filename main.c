@@ -3,11 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <errno.h>
 #include <time.h>
 #include <ctype.h>
 #include <signal.h>
@@ -32,7 +27,7 @@ void signal_handler(int sig) {
     g_running = 0;
 }
 
-// Đọc file config dạng key=value
+// Đọc file config
 int read_config(const char *filename, Config *cfg) {
     FILE *f = fopen(filename, "r");
     if (!f) return 0;
@@ -92,7 +87,7 @@ int get_pool(PoolInfo *pool) {
     return 1;
 }
 
-// -------------------- Hàm tính SHA1 sử dụng DSHA1 (C version) --------------------
+// -------------------- Hàm tính SHA1 --------------------
 static inline void sha1_string(const char *input, unsigned char *output) {
     DSHA1_CTX ctx;
     dsha1_init(&ctx);
@@ -107,7 +102,6 @@ typedef struct {
     int diff;
 } Job;
 
-// Tìm nonce thỏa mãn - TỐI ƯU CAO
 static inline long long solve_job(const Job *job, double *elapsed_ms) {
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -138,7 +132,6 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
         
         sha1_string(buffer, hash);
         
-        // So sánh toàn bộ 20 bytes
         if (memcmp(hash, target, 20) == 0) {
             clock_gettime(CLOCK_MONOTONIC, &end);
             *elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
@@ -149,7 +142,6 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
     return -1;
 }
 
-// Hàm định dạng hashrate
 static inline const char* format_hashrate(double h) {
     static char buf[64];
     if (h >= 1e9)
@@ -185,50 +177,28 @@ void *worker_thread(void *arg) {
         }
         printf("[worker%d] Kết nối tới %s:%d\n", id, pool.ip, pool.port);
 
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-            sleep(3);
-            continue;
-        }
-        
-        struct sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(pool.port);
-        if (inet_pton(AF_INET, pool.ip, &addr.sin_addr) <= 0) {
-            close(sock);
-            sleep(3);
-            continue;
-        }
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            close(sock);
-            sleep(3);
-            continue;
-        }
-
-        char buf[1024];
-        int n = recv(sock, buf, sizeof(buf)-1, 0);
-        if (n <= 0) {
-            close(sock);
-            continue;
-        }
-        buf[n] = '\0';
-        char *end = strchr(buf, '\n');
-        if (end) *end = '\0';
-        printf("[worker%d] Connected (server v%s)\n", id, buf);
-
         int accepted = 0, rejected = 0;
         time_t t0 = time(NULL);
         time_t last_stats = t0;
 
         while (g_running) {
-            char req[256];
-            snprintf(req, sizeof(req), "JOB,%s,%s,%s\n",
-                     cfg.username, cfg.difficulty, cfg.mining_key);
-            if (send(sock, req, strlen(req), 0) < 0) break;
-
-            n = recv(sock, buf, sizeof(buf)-1, 0);
-            if (n <= 0) break;
-            buf[n] = '\0';
+            // Tạo request
+            char req[512];
+            snprintf(req, sizeof(req), "JOB,%s,%s,%s", cfg.username, cfg.difficulty, cfg.mining_key);
+            
+            // Gửi request qua curl
+            char cmd[1024];
+            snprintf(cmd, sizeof(cmd), "curl -s --max-time 10 \"%s:%d\" -d \"%s\"", pool.ip, pool.port, req);
+            
+            FILE *fp = popen(cmd, "r");
+            if (!fp) break;
+            
+            char buf[1024];
+            if (!fgets(buf, sizeof(buf), fp)) {
+                pclose(fp);
+                break;
+            }
+            pclose(fp);
             
             char *newline = strchr(buf, '\n');
             if (newline) *newline = '\0';
@@ -250,28 +220,28 @@ void *worker_thread(void *arg) {
             long long nonce = solve_job(&job, &elapsed_ms);
             if (nonce >= 0) {
                 double hashrate = 1e6 * nonce / (elapsed_ms * 1000.0);
-                char msg[256];
-                snprintf(msg, sizeof(msg), "%lld,%.2f,CMiner,%s,%u\n",
-                         nonce, hashrate, cfg.rig_identifier, mtid);
-                if (send(sock, msg, strlen(msg), 0) < 0) break;
-
-                n = recv(sock, buf, sizeof(buf)-1, 0);
-                if (n <= 0) break;
-                buf[n] = '\0';
-                char *fb = strtok(buf, "\n");
-                if (!fb) continue;
-
-                if (strcmp(fb, "GOOD") == 0) {
-                    accepted++;
-                    printf("[worker%d] ✅ Share accepted | %s | Total: %d\n",
-                           id, format_hashrate(hashrate), accepted);
-                } else if (strncmp(fb, "BAD,", 4) == 0) {
-                    rejected++;
-                    printf("[worker%d] ❌ Rejected: %s (rej=%d)\n",
-                           id, fb+4, rejected);
-                } else if (strcmp(fb, "BLOCK") == 0) {
-                    printf("[worker%d] ⛓️ New block found!\n", id);
+                
+                // Gửi kết quả
+                char result[256];
+                snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,%u", nonce, hashrate, cfg.rig_identifier, mtid);
+                
+                snprintf(cmd, sizeof(cmd), "curl -s --max-time 10 \"%s:%d\" -d \"%s\"", pool.ip, pool.port, result);
+                fp = popen(cmd, "r");
+                if (!fp) break;
+                
+                if (fgets(buf, sizeof(buf), fp)) {
+                    char *fb = strtok(buf, "\n");
+                    if (fb && strcmp(fb, "GOOD") == 0) {
+                        accepted++;
+                        printf("[worker%d] ✅ Share accepted | %s | Total: %d\n", id, format_hashrate(hashrate), accepted);
+                    } else if (fb && strncmp(fb, "BAD,", 4) == 0) {
+                        rejected++;
+                        printf("[worker%d] ❌ Rejected: %s (rej=%d)\n", id, fb+4, rejected);
+                    } else if (fb && strcmp(fb, "BLOCK") == 0) {
+                        printf("[worker%d] ⛓️ New block found!\n", id);
+                    }
                 }
+                pclose(fp);
 
                 time_t now = time(NULL);
                 if (now - last_stats >= 30) {
@@ -283,7 +253,6 @@ void *worker_thread(void *arg) {
                 }
             }
         }
-        close(sock);
         if (g_running) {
             fprintf(stderr, "[worker%d] ⚠️ Mất kết nối, kết nối lại...\n", id);
             sleep(2);
@@ -303,12 +272,12 @@ int main() {
         strcpy(cfg.username, "Nam2010");
         strcpy(cfg.mining_key, "258013");
         strcpy(cfg.difficulty, "LOW");
-        strcpy(cfg.rig_identifier, "RustRig");
-        cfg.thread_count = 4;
+        strcpy(cfg.rig_identifier, "iPhoneRig");
+        cfg.thread_count = 2;
     }
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
-    if (cfg.thread_count > 16) cfg.thread_count = 16;
+    if (cfg.thread_count > 4) cfg.thread_count = 4;
 
     printf("\n========================================\n");
     printf("   🦀 Duino-Coin C Miner v2.0\n");
