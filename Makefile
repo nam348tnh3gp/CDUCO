@@ -17,11 +17,4 @@ clean:
 run: miner
 	./miner
 
-help:
-	@echo "Commands:"
-	@echo "  make     - Build miner"
-	@echo "  make debug - Build debug version"
-	@echo "  make clean - Remove binaries"
-	@echo "  make run   - Build and run"
-
-.PHONY: all debug clean run help
+.PHONY: all debug clean run
