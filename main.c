@@ -12,7 +12,11 @@
 #include <ctype.h>
 #include <signal.h>
 
-#include "DSHA1.h"  // Sửa lại tên file cho đúng
+#ifdef __APPLE__
+    #include <CommonCrypto/CommonCrypto.h>
+#else
+    #include <openssl/sha.h>
+#endif
 
 // -------------------- Cấu hình --------------------
 typedef struct {
@@ -91,12 +95,15 @@ int get_pool(PoolInfo *pool) {
     return 1;
 }
 
-// -------------------- Hàm tính SHA1 sử dụng DSHA1 tối ưu --------------------
+// -------------------- Hàm tính SHA1 sử dụng CommonCrypto --------------------
 static inline void sha1_string(const char *input, unsigned char *output) {
-    DSHA1_CTX ctx;  // Đổi từ DSHA1 sang DSHA1_CTX
-    dsha1_init(&ctx);
-    dsha1_update(&ctx, (const unsigned char*)input, strlen(input));  // Đổi từ dsha1_write sang dsha1_update
-    dsha1_final(&ctx, output);  // Đổi từ dsha1_finalize sang dsha1_final
+    #ifdef __APPLE__
+        // iOS/macOS: dùng CommonCrypto
+        CC_SHA1(input, (CC_LONG)strlen(input), output);
+    #else
+        // Android/Linux: dùng OpenSSL
+        SHA1((const unsigned char*)input, strlen(input), output);
+    #endif
 }
 
 // -------------------- Giải job --------------------
