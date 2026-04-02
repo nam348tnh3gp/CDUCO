@@ -30,6 +30,25 @@ void signal_handler(int sig) {
     g_running = 0;
 }
 
+// Hàm kiểm tra mining key có an toàn không
+int is_safe_mining_key(const char *key) {
+    if (strchr(key, ',') != NULL) {
+        fprintf(stderr, "❌ Lỗi: Mining key chứa dấu phẩy (','), ký tự này không được phép.\n");
+        return 0;
+    }
+    if (strchr(key, '\n') != NULL || strchr(key, '\r') != NULL) {
+        fprintf(stderr, "❌ Lỗi: Mining key chứa ký tự xuống dòng.\n");
+        return 0;
+    }
+    for (const char *p = key; *p; p++) {
+        if (iscntrl((unsigned char)*p) && *p != '\t') {
+            fprintf(stderr, "❌ Lỗi: Mining key chứa ký tự điều khiển (mã %d).\n", *p);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 // Đọc file config dạng key=value
 int read_config(const char *filename, Config *cfg) {
     FILE *f = fopen(filename, "r");
@@ -37,21 +56,37 @@ int read_config(const char *filename, Config *cfg) {
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '\n' || line[0] == '#') continue;
-        char *key = strtok(line, "=");
-        char *val = strtok(NULL, "\n");
-        if (!key || !val) continue;
-        while (isspace(*key)) key++;
+        
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        
+        *eq = '\0';
+        char *key = line;
+        char *val = eq + 1;
+        
+        while (isspace((unsigned char)*key)) key++;
         char *end = key + strlen(key) - 1;
-        while (end > key && isspace(*end)) *end-- = '\0';
-        while (isspace(*val)) val++;
+        while (end > key && isspace((unsigned char)*end)) *end-- = '\0';
+        
+        while (isspace((unsigned char)*val)) val++;
         end = val + strlen(val) - 1;
-        while (end > val && isspace(*end)) *end-- = '\0';
+        while (end > val && isspace((unsigned char)*end)) *end-- = '\0';
 
-        if (strcmp(key, "username") == 0) strcpy(cfg->username, val);
-        else if (strcmp(key, "mining_key") == 0) strcpy(cfg->mining_key, val);
-        else if (strcmp(key, "difficulty") == 0) strcpy(cfg->difficulty, val);
-        else if (strcmp(key, "rig_identifier") == 0) strcpy(cfg->rig_identifier, val);
-        else if (strcmp(key, "thread_count") == 0) cfg->thread_count = atoi(val);
+        if (strcmp(key, "username") == 0) {
+            strncpy(cfg->username, val, sizeof(cfg->username) - 1);
+            cfg->username[sizeof(cfg->username) - 1] = '\0';
+        } else if (strcmp(key, "mining_key") == 0) {
+            strncpy(cfg->mining_key, val, sizeof(cfg->mining_key) - 1);
+            cfg->mining_key[sizeof(cfg->mining_key) - 1] = '\0';
+        } else if (strcmp(key, "difficulty") == 0) {
+            strncpy(cfg->difficulty, val, sizeof(cfg->difficulty) - 1);
+            cfg->difficulty[sizeof(cfg->difficulty) - 1] = '\0';
+        } else if (strcmp(key, "rig_identifier") == 0) {
+            strncpy(cfg->rig_identifier, val, sizeof(cfg->rig_identifier) - 1);
+            cfg->rig_identifier[sizeof(cfg->rig_identifier) - 1] = '\0';
+        } else if (strcmp(key, "thread_count") == 0) {
+            cfg->thread_count = atoi(val);
+        }
     }
     fclose(f);
     return 1;
@@ -82,7 +117,6 @@ int get_pool(PoolInfo *pool) {
     }
     pclose(fp);
     
-    // Parse JSON response
     char *ip_start = strstr(buf, "\"ip\":\"");
     if (!ip_start) {
         printf("❌ Không tìm thấy IP trong response\n");
@@ -234,11 +268,16 @@ void *worker_thread(void *arg) {
     int id = args->id;
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
+    
+    // Kiểm tra mining key
+    if (!is_safe_mining_key(cfg.mining_key)) {
+        fprintf(stderr, "[worker%d] ❌ Mining key không an toàn, thread sẽ dừng.\n", id);
+        return NULL;
+    }
 
     while (g_running) {
         PoolInfo pool;
         
-        // Lấy pool từ server
         if (!get_pool(&pool)) {
             fprintf(stderr, "[worker%d] ❌ Không lấy được pool, thử lại sau 10s\n", id);
             sleep(10);
@@ -254,7 +293,6 @@ void *worker_thread(void *arg) {
             continue;
         }
         
-        // Đọc server version
         char server_version[128];
         if (recv_line(sock, server_version, sizeof(server_version))) {
             printf("[worker%d] ✅ Kết nối thành công (server v%s)\n", id, server_version);
@@ -266,9 +304,10 @@ void *worker_thread(void *arg) {
         time_t last_stats = t0;
         
         while (g_running) {
-            // Gửi request JOB
+            // ========== SỬA LỖI 1: Đúng format JOB (có dấu phẩy cuối) ==========
+            // Format: JOB,username,difficulty,mining_key,
             char req[256];
-            snprintf(req, sizeof(req), "JOB,%s,%s,%s\n", 
+            snprintf(req, sizeof(req), "JOB,%s,%s,%s,\n", 
                      cfg.username, cfg.difficulty, cfg.mining_key);
             
             if (!send_tcp(sock, req)) {
@@ -276,14 +315,12 @@ void *worker_thread(void *arg) {
                 break;
             }
             
-            // Nhận job
             char jobline[1024];
             if (!recv_line(sock, jobline, sizeof(jobline))) {
                 printf("[worker%d] ⚠️ Không nhận được job\n", id);
                 break;
             }
             
-            // Parse job: base,target,diff
             char *base = strtok(jobline, ",");
             char *target_hex = strtok(NULL, ",");
             char *diff_str = strtok(NULL, ",");
@@ -294,7 +331,8 @@ void *worker_thread(void *arg) {
             }
             
             Job job;
-            strcpy(job.base, base);
+            strncpy(job.base, base, sizeof(job.base) - 1);
+            job.base[sizeof(job.base) - 1] = '\0';
             if (strlen(target_hex) != 40) continue;
             for (int i = 0; i < 20; i++) {
                 sscanf(target_hex + i*2, "%2hhx", &job.target[i]);
@@ -307,9 +345,10 @@ void *worker_thread(void *arg) {
             if (nonce >= 0) {
                 double hashrate = (nonce * 1000.0) / elapsed_ms;
                 
-                // Gửi kết quả
+                // ========== SỬA LỖI 2: Đúng format result (2 dấu phẩy liên tiếp) ==========
+                // Format: nonce,hashrate,CMiner,rig_identifier,,thread_id
                 char result[256];
-                snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,%u\n", 
+                snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,,%u\n", 
                          nonce, hashrate, cfg.rig_identifier, mtid);
                 
                 if (!send_tcp(sock, result)) {
@@ -317,7 +356,6 @@ void *worker_thread(void *arg) {
                     break;
                 }
                 
-                // Nhận feedback
                 char feedback[128];
                 if (!recv_line(sock, feedback, sizeof(feedback))) {
                     printf("[worker%d] ⚠️ Không nhận được feedback\n", id);
@@ -377,31 +415,38 @@ int main() {
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
     if (cfg.thread_count > 4) cfg.thread_count = 4;
-
+    
     printf("\n========================================\n");
-    printf("   🦀 Duino-Coin C Miner v2.0\n");
+    printf("   🦀 Duino-Coin C Miner v2.0 (FIXED)\n");
     printf("========================================\n");
     printf("Username:   %s\n", cfg.username);
     printf("Difficulty: %s\n", cfg.difficulty);
     printf("Rig:        %s\n", cfg.rig_identifier);
     printf("Threads:    %d\n", cfg.thread_count);
     printf("========================================\n\n");
-
+    
+    if (!is_safe_mining_key(cfg.mining_key)) {
+        fprintf(stderr, "\n❌ MINING KEY KHÔNG HỢP LỆ!\n");
+        fprintf(stderr, "Vui lòng sửa lại mining key trong file config.txt\n");
+        fprintf(stderr, "Lưu ý: Mining key KHÔNG được chứa dấu phẩy (,) hoặc ký tự xuống dòng.\n");
+        return 1;
+    }
+    
     srand(time(NULL));
     unsigned int mtid = rand() % 90000 + 10000;
-
+    
     pthread_t threads[cfg.thread_count];
     WorkerArgs args[cfg.thread_count];
-
+    
     for (int i = 0; i < cfg.thread_count; i++) {
         args[i].id = i;
         args[i].cfg = cfg;
         args[i].multithread_id = mtid;
         pthread_create(&threads[i], NULL, worker_thread, &args[i]);
     }
-
+    
     printf("✅ Miner started! Press Ctrl+C to stop.\n\n");
-
+    
     for (int i = 0; i < cfg.thread_count; i++) {
         pthread_join(threads[i], NULL);
     }
