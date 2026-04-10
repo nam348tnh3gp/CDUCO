@@ -414,7 +414,7 @@ int main() {
     }
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
-    if (cfg.thread_count > 4) cfg.thread_count = 4;
+    if (cfg.thread_count > 50) cfg.thread_count = 50;  // <--- CHỈ SỬA DÒNG NÀY (4 -> 50)
     
     printf("\n========================================\n");
     printf("   🦀 Duino-Coin C Miner v2.0 (FIXED)\n");
