@@ -77,6 +77,7 @@ mining_key=YourMiningKey
 difficulty=LOW
 rig_identifier=MyRig
 thread_count=2
+nice_level=19 # Lowest,CPU prioritizes other tasks.-20,CPU prioritizes miner, requires sudo.
 ```
 
 Configuration Options
