@@ -110,7 +110,7 @@ int fetch_pool_from_server(PoolInfo *pool) {
     
     printf("🌐 Đang lấy pool từ server...\n");
     
-    fp = popen("curl -s --max-time 10 https://ducofaucet.nam348tnh.workers.dev/getPool 2>/dev/null", "r");
+    fp = popen("curl -s --max-time 10 https://server.duinocoin.com/getPool 2>/dev/null", "r");
     if (!fp) {
         printf("❌ Không thể kết nối đến server getPool\n");
         return 0;
