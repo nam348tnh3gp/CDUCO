@@ -24,6 +24,11 @@ typedef struct {
 
 static volatile int g_running = 1;
 
+// === Cache pool info - chỉ gọi server 1 lần ===
+static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static PoolInfo global_pool;
+static int pool_initialized = 0;
+
 void signal_handler(int sig) {
     (void)sig;
     printf("\n🛑 Đang dừng miner...\n");
@@ -98,7 +103,8 @@ typedef struct {
     int port;
 } PoolInfo;
 
-int get_pool(PoolInfo *pool) {
+// Hàm lấy pool từ server (chỉ gọi 1 lần duy nhất)
+int fetch_pool_from_server(PoolInfo *pool) {
     FILE *fp;
     char buf[1024];
     
@@ -145,6 +151,32 @@ int get_pool(PoolInfo *pool) {
     pool->port = atoi(port_start);
     
     printf("✅ Lấy pool thành công: %s:%d\n", pool->ip, pool->port);
+    return 1;
+}
+
+// === Hàm khởi tạo pool toàn cục (gọi 1 lần từ main) ===
+int init_global_pool() {
+    pthread_mutex_lock(&pool_mutex);
+    if (!pool_initialized) {
+        if (!fetch_pool_from_server(&global_pool)) {
+            pthread_mutex_unlock(&pool_mutex);
+            return 0;
+        }
+        pool_initialized = 1;
+    }
+    pthread_mutex_unlock(&pool_mutex);
+    return 1;
+}
+
+// === Hàm get_pool (chỉ trả về pool đã có, không gọi server) ===
+int get_pool(PoolInfo *pool) {
+    pthread_mutex_lock(&pool_mutex);
+    if (!pool_initialized) {
+        pthread_mutex_unlock(&pool_mutex);
+        return 0;
+    }
+    memcpy(pool, &global_pool, sizeof(PoolInfo));
+    pthread_mutex_unlock(&pool_mutex);
     return 1;
 }
 
@@ -269,6 +301,13 @@ void *worker_thread(void *arg) {
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
     
+    // Staggered startup delay để tránh đổ bộ cùng lúc
+    if (id > 0) {
+        int delay_ms = id * 100;
+        if (delay_ms > 5000) delay_ms = 5000;
+        usleep(delay_ms * 1000);
+    }
+    
     // Kiểm tra mining key
     if (!is_safe_mining_key(cfg.mining_key)) {
         fprintf(stderr, "[worker%d] ❌ Mining key không an toàn, thread sẽ dừng.\n", id);
@@ -278,9 +317,10 @@ void *worker_thread(void *arg) {
     while (g_running) {
         PoolInfo pool;
         
+        // Chỉ lấy pool từ biến toàn cục (đã có sẵn, không gọi server)
         if (!get_pool(&pool)) {
-            fprintf(stderr, "[worker%d] ❌ Không lấy được pool, thử lại sau 10s\n", id);
-            sleep(10);
+            fprintf(stderr, "[worker%d] ❌ Pool chưa được khởi tạo!\n", id);
+            sleep(1);
             continue;
         }
         
@@ -304,7 +344,6 @@ void *worker_thread(void *arg) {
         time_t last_stats = t0;
         
         while (g_running) {
-            // ========== SỬA LỖI 1: Đúng format JOB (có dấu phẩy cuối) ==========
             // Format: JOB,username,difficulty,mining_key,
             char req[256];
             snprintf(req, sizeof(req), "JOB,%s,%s,%s,\n", 
@@ -345,7 +384,6 @@ void *worker_thread(void *arg) {
             if (nonce >= 0) {
                 double hashrate = (nonce * 1000.0) / elapsed_ms;
                 
-                // ========== SỬA LỖI 2: Đúng format result (2 dấu phẩy liên tiếp) ==========
                 // Format: nonce,hashrate,CMiner,rig_identifier,,thread_id
                 char result[256];
                 snprintf(result, sizeof(result), "%lld,%.2f,CMiner,%s,,%u\n", 
@@ -414,10 +452,10 @@ int main() {
     }
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
-    if (cfg.thread_count > 50) cfg.thread_count = 50;  // <--- CHỈ SỬA DÒNG NÀY (4 -> 50)
+    if (cfg.thread_count > 100) cfg.thread_count = 100;
     
     printf("\n========================================\n");
-    printf("   🦀 Duino-Coin C Miner v2.0 (FIXED)\n");
+    printf("   🦀 Duino-Coin C Miner v2.0\n");
     printf("========================================\n");
     printf("Username:   %s\n", cfg.username);
     printf("Difficulty: %s\n", cfg.difficulty);
@@ -427,8 +465,12 @@ int main() {
     
     if (!is_safe_mining_key(cfg.mining_key)) {
         fprintf(stderr, "\n❌ MINING KEY KHÔNG HỢP LỆ!\n");
-        fprintf(stderr, "Vui lòng sửa lại mining key trong file config.txt\n");
-        fprintf(stderr, "Lưu ý: Mining key KHÔNG được chứa dấu phẩy (,) hoặc ký tự xuống dòng.\n");
+        return 1;
+    }
+    
+    // === CHỈ GỌI SERVER 1 LẦN DUY NHẤT Ở ĐÂY ===
+    if (!init_global_pool()) {
+        fprintf(stderr, "❌ Không thể lấy pool info từ server!\n");
         return 1;
     }
     
@@ -437,6 +479,8 @@ int main() {
     
     pthread_t threads[cfg.thread_count];
     WorkerArgs args[cfg.thread_count];
+    
+    printf("✅ Đang khởi động %d threads...\n", cfg.thread_count);
     
     for (int i = 0; i < cfg.thread_count; i++) {
         args[i].id = i;
