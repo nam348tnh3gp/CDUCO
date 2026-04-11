@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <sys/resource.h>  // Thêm cho nice()
 
 #include "DSHA1.h"
 
@@ -20,6 +21,7 @@ typedef struct {
     char difficulty[16];
     char rig_identifier[64];
     int thread_count;
+    int nice_level;  // THÊM MỚI: mức độ ưu tiên (-20..19)
 } Config;
 
 static volatile int g_running = 1;
@@ -54,11 +56,47 @@ int is_safe_mining_key(const char *key) {
     return 1;
 }
 
+// === THÊM MỚI: Hàm set nice level cho process ===
+void set_miner_priority(int nice_value) {
+    if (nice_value == 0) {
+        printf("✅ CPU priority: default (nice=0)\n");
+        return;
+    }
+    
+    // Giới hạn nice value trong khoảng -20..19
+    if (nice_value < -20) nice_value = -20;
+    if (nice_value > 19) nice_value = 19;
+    
+    errno = 0;
+    int result = nice(nice_value);
+    
+    if (result == -1 && errno != 0) {
+        fprintf(stderr, "⚠️ Warning: Cannot set nice level %d: %s\n", 
+                nice_value, strerror(errno));
+        if (nice_value < 0) {
+            fprintf(stderr, "   💡 Higher priority (negative nice) requires root (sudo)\n");
+        }
+    } else {
+        printf("✅ CPU priority set to nice=%d (", nice_value);
+        if (nice_value > 0) {
+            printf("LOWER priority - other apps take precedence)\n");
+        } else if (nice_value < 0) {
+            printf("HIGHER priority - may affect system performance)\n");
+        } else {
+            printf("default)\n");
+        }
+    }
+}
+
 // Đọc file config dạng key=value
 int read_config(const char *filename, Config *cfg) {
     FILE *f = fopen(filename, "r");
     if (!f) return 0;
     char line[256];
+    
+    // Set mặc định cho nice_level
+    cfg->nice_level = 0;
+    
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '\n' || line[0] == '#') continue;
         
@@ -91,6 +129,8 @@ int read_config(const char *filename, Config *cfg) {
             cfg->rig_identifier[sizeof(cfg->rig_identifier) - 1] = '\0';
         } else if (strcmp(key, "thread_count") == 0) {
             cfg->thread_count = atoi(val);
+        } else if (strcmp(key, "nice_level") == 0) {  // THÊM MỚI
+            cfg->nice_level = atoi(val);
         }
     }
     fclose(f);
@@ -449,6 +489,7 @@ int main() {
         strcpy(cfg.difficulty, "LOW");
         strcpy(cfg.rig_identifier, "iPhoneRig");
         cfg.thread_count = 2;
+        cfg.nice_level = 0;
     }
     
     if (cfg.thread_count < 1) cfg.thread_count = 1;
@@ -461,12 +502,23 @@ int main() {
     printf("Difficulty: %s\n", cfg.difficulty);
     printf("Rig:        %s\n", cfg.rig_identifier);
     printf("Threads:    %d\n", cfg.thread_count);
+    printf("Nice level: %d\n", cfg.nice_level);
     printf("========================================\n\n");
     
     if (!is_safe_mining_key(cfg.mining_key)) {
         fprintf(stderr, "\n❌ MINING KEY KHÔNG HỢP LỆ!\n");
         return 1;
     }
+    
+    // === THÊM MỚI: Auto-set nice nếu chạy nhiều thread ===
+    if (cfg.nice_level == 0 && cfg.thread_count > 10) {
+        cfg.nice_level = 10;
+        printf("⚠️  Many threads (%d) detected, auto-set nice=10 to avoid system lag\n", cfg.thread_count);
+        printf("   (You can override with nice_level=XX in config.txt)\n\n");
+    }
+    
+    // === THÊM MỚI: Set nice level cho process ===
+    set_miner_priority(cfg.nice_level);
     
     // === CHỈ GỌI SERVER 1 LẦN DUY NHẤT Ở ĐÂY ===
     if (!init_global_pool()) {
@@ -480,7 +532,7 @@ int main() {
     pthread_t threads[cfg.thread_count];
     WorkerArgs args[cfg.thread_count];
     
-    printf("✅ Đang khởi động %d threads...\n", cfg.thread_count);
+    printf("\n✅ Đang khởi động %d threads...\n", cfg.thread_count);
     
     for (int i = 0; i < cfg.thread_count; i++) {
         args[i].id = i;
