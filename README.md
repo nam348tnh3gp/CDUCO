@@ -130,7 +130,7 @@ Custom Build
 To compile manually with optimization flags:
 
 ```bash
-clang -o miner main.c DSHA1.c -lpthread -lcurl -O3 -march=native
+clang -o miner main.c DSHA1.h -lpthread -lcurl -O3 -march=native
 ```
 
 ---
