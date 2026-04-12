@@ -1,4 +1,5 @@
-#define _GNU_SOURCE  // FIX: cho nice() và các hàm GNU
+#define _POSIX_C_SOURCE 199309L  // FIX: cho nanosleep()
+#define _GNU_SOURCE              // FIX: cho nice()
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +13,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/resource.h>  // cho setpriority()
+#include <sys/resource.h>
 
 #include "DSHA1.h"
 
@@ -72,14 +73,13 @@ int is_safe_mining_key(const char *key) {
     return 1;
 }
 
-// === FIX: Hàm set priority dùng setpriority() thay vì nice() ===
+// Hàm set nice level cho process (dùng setpriority thay vì nice)
 void set_miner_priority(int nice_value) {
     if (nice_value == 0) {
         printf("✅ CPU priority: default (nice=0)\n");
         return;
     }
     
-    // Giới hạn nice value trong khoảng -20..19
     if (nice_value < -20) nice_value = -20;
     if (nice_value > 19) nice_value = 19;
     
@@ -94,10 +94,11 @@ void set_miner_priority(int nice_value) {
             fprintf(stderr, "   💡 Higher priority (negative nice) requires root (sudo)\n");
         }
     } else {
-        printf("✅ CPU priority set to nice=%d (", nice_value);
-        if (nice_value > 0) {
+        int current = getpriority(PRIO_PROCESS, 0);
+        printf("✅ CPU priority set to nice=%d (", current);
+        if (current > 0) {
             printf("LOWER priority - other apps take precedence)\n");
-        } else if (nice_value < 0) {
+        } else if (current < 0) {
             printf("HIGHER priority - may affect system performance)\n");
         } else {
             printf("default)\n");
@@ -525,7 +526,7 @@ int main() {
         printf("   (You can override with nice_level=XX in config.txt)\n\n");
     }
     
-    // Set nice level cho process (dùng setpriority thay vì nice)
+    // Set nice level cho process
     set_miner_priority(cfg.nice_level);
     
     // CHỈ GỌI SERVER 1 LẦN DUY NHẤT
