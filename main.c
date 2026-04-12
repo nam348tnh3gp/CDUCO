@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 199309L  // FIX: cho usleep() và nanosleep()
+#define _GNU_SOURCE  // FIX: cho nice() và các hàm GNU
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/resource.h>  // FIX: cho nice()
+#include <sys/resource.h>  // cho setpriority()
 
 #include "DSHA1.h"
 
@@ -72,20 +72,22 @@ int is_safe_mining_key(const char *key) {
     return 1;
 }
 
-// Hàm set nice level cho process
+// === FIX: Hàm set priority dùng setpriority() thay vì nice() ===
 void set_miner_priority(int nice_value) {
     if (nice_value == 0) {
         printf("✅ CPU priority: default (nice=0)\n");
         return;
     }
     
+    // Giới hạn nice value trong khoảng -20..19
     if (nice_value < -20) nice_value = -20;
     if (nice_value > 19) nice_value = 19;
     
     errno = 0;
-    int result = nice(nice_value);
+    // setpriority(PRIO_PROCESS, 0, nice_value) - 0 là process hiện tại
+    int result = setpriority(PRIO_PROCESS, 0, nice_value);
     
-    if (result == -1 && errno != 0) {
+    if (result == -1) {
         fprintf(stderr, "⚠️ Warning: Cannot set nice level %d: %s\n", 
                 nice_value, strerror(errno));
         if (nice_value < 0) {
@@ -354,7 +356,7 @@ void *worker_thread(void *arg) {
     if (id > 0) {
         int delay_ms = id * 100;
         if (delay_ms > 5000) delay_ms = 5000;
-        safe_usleep(delay_ms * 1000);  // FIX: dùng safe_usleep thay vì usleep
+        safe_usleep(delay_ms * 1000);
     }
     
     // Kiểm tra mining key
@@ -523,7 +525,7 @@ int main() {
         printf("   (You can override with nice_level=XX in config.txt)\n\n");
     }
     
-    // Set nice level cho process
+    // Set nice level cho process (dùng setpriority thay vì nice)
     set_miner_priority(cfg.nice_level);
     
     // CHỈ GỌI SERVER 1 LẦN DUY NHẤT
