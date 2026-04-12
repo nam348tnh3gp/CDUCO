@@ -1,5 +1,5 @@
-#define _POSIX_C_SOURCE 199309L  // FIX: cho nanosleep()
-#define _GNU_SOURCE              // FIX: cho nice()
+#define _POSIX_C_SOURCE 199309L
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,18 +73,18 @@ int is_safe_mining_key(const char *key) {
     return 1;
 }
 
-// Hàm set nice level cho process (dùng setpriority thay vì nice)
+// Hàm set nice level cho process
 void set_miner_priority(int nice_value) {
     if (nice_value == 0) {
         printf("✅ CPU priority: default (nice=0)\n");
         return;
     }
     
+    // Giới hạn nice value trong khoảng -20..19
     if (nice_value < -20) nice_value = -20;
     if (nice_value > 19) nice_value = 19;
     
     errno = 0;
-    // setpriority(PRIO_PROCESS, 0, nice_value) - 0 là process hiện tại
     int result = setpriority(PRIO_PROCESS, 0, nice_value);
     
     if (result == -1) {
@@ -112,6 +112,7 @@ int read_config(const char *filename, Config *cfg) {
     if (!f) return 0;
     char line[256];
     
+    // Giá trị mặc định
     cfg->nice_level = 0;
     
     while (fgets(line, sizeof(line), f)) {
@@ -148,6 +149,7 @@ int read_config(const char *filename, Config *cfg) {
             cfg->thread_count = atoi(val);
         } else if (strcmp(key, "nice_level") == 0) {
             cfg->nice_level = atoi(val);
+            printf("📝 Config: nice_level = %d\n", cfg->nice_level);
         }
     }
     fclose(f);
@@ -155,7 +157,6 @@ int read_config(const char *filename, Config *cfg) {
 }
 
 // -------------------- Lấy pool từ server --------------------
-// Hàm lấy pool từ server (chỉ gọi 1 lần duy nhất)
 int fetch_pool_from_server(PoolInfo *pool) {
     FILE *fp;
     char buf[1024];
@@ -206,7 +207,6 @@ int fetch_pool_from_server(PoolInfo *pool) {
     return 1;
 }
 
-// Hàm khởi tạo pool toàn cục (gọi 1 lần từ main)
 int init_global_pool() {
     pthread_mutex_lock(&pool_mutex);
     if (!pool_initialized) {
@@ -220,7 +220,6 @@ int init_global_pool() {
     return 1;
 }
 
-// Hàm get_pool (chỉ trả về pool đã có, không gọi server)
 int get_pool(PoolInfo *pool) {
     pthread_mutex_lock(&pool_mutex);
     if (!pool_initialized) {
@@ -250,7 +249,6 @@ int tcp_connect(const char *ip, int port) {
     return sock;
 }
 
-// -------------------- Gửi và nhận dữ liệu qua TCP --------------------
 int send_tcp(int sock, const char *data) {
     ssize_t len = strlen(data);
     ssize_t sent = send(sock, data, len, 0);
@@ -326,7 +324,6 @@ static inline long long solve_job(const Job *job, double *elapsed_ms) {
     return -1;
 }
 
-// Hàm định dạng hashrate
 static inline const char* format_hashrate(double h) {
     static char buf[64];
     if (h >= 1e9)
@@ -353,14 +350,12 @@ void *worker_thread(void *arg) {
     Config cfg = args->cfg;
     unsigned int mtid = args->multithread_id;
     
-    // Staggered startup delay để tránh đổ bộ cùng lúc
     if (id > 0) {
         int delay_ms = id * 100;
         if (delay_ms > 5000) delay_ms = 5000;
         safe_usleep(delay_ms * 1000);
     }
     
-    // Kiểm tra mining key
     if (!is_safe_mining_key(cfg.mining_key)) {
         fprintf(stderr, "[worker%d] ❌ Mining key không an toàn, thread sẽ dừng.\n", id);
         return NULL;
@@ -519,12 +514,7 @@ int main() {
         return 1;
     }
     
-    // Auto-set nice nếu chạy nhiều thread
-    if (cfg.nice_level == 0 && cfg.thread_count > 10) {
-        cfg.nice_level = 10;
-        printf("⚠️  Many threads (%d) detected, auto-set nice=10 to avoid system lag\n", cfg.thread_count);
-        printf("   (You can override with nice_level=XX in config.txt)\n\n");
-    }
+    // ĐÃ BỎ AUTO-SET NICE - TÔN TRỌNG GIÁ TRỊ TỪ CONFIG
     
     // Set nice level cho process
     set_miner_priority(cfg.nice_level);
