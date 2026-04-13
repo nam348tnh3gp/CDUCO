@@ -15,7 +15,7 @@
 | Feature | Description |
 |---------|-------------|
 | 🚀 **High Performance** | Optimized SHA1 implementation for faster mining |
-| 🧵 **Multithreading** | Configurable thread count (1-4 threads) |
+| 🧵 **Multithreading** | Configurable thread count (1-50 threads) |
 | 🔌 **Direct TCP Connection** | Native protocol implementation without HTTP overhead |
 | 📊 **Real-time Statistics** | Live hashrate and acceptance rate display |
 | ⚙️ **Easy Configuration** | Simple config.txt file for all settings |
