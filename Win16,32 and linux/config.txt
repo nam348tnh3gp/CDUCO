@@ -1,0 +1,6 @@
+username=Nam2010
+mining_key=258013
+difficulty=LOW
+rig_identifier=CMiner
+thread_count=2
+nice_level=19    #19 = lowest, freeing up CPU for other applications.
