@@ -1,25 +1,55 @@
 /*
- * DUINO-COIN C MINER for WINDOWS 3.1 (Win16) – HTTP direct version
- * 
- * Compile: cl /AM /G2 /Os duino.c dsha1.c winsock.lib
- *          (dùng Large memory model nếu cần)
+ * DUINO-COIN C MINER – Cross‑platform: Windows 3.1 (Win16) + Linux
+ *
+ * Build Windows 3.1 (16-bit):
+ *   cl /AM /G2 /Os duino.c dsha1.c winsock.lib
+ *
+ * Build Linux:
+ *   gcc -O2 -s -o duino duino.c -lpthread
  */
 
-#define STRICT
-#include <windows.h>
-#include <winsock.h>          /* Winsock 1.1 16-bit */
+#ifdef _WIN32
+    /* ========== Win16 ========== */
+    #define STRICT
+    #include <windows.h>
+    #include <winsock.h>
+    #define sock_t SOCKET
+    #define INVALID_SOCK -1          /* INVALID_SOCKET đã có trong winsock.h nhưng ta ánh xạ lại */
+    #define sclose closesocket
+    #define snprintf _snprintf
+#else
+    /* ========== Linux ========== */
+    #define _POSIX_C_SOURCE 199309L
+    #include <unistd.h>
+    #include <pthread.h>
+    #include <sys/socket.h>
+    #include <netdb.h>
+    #include <arpa/inet.h>
+    #include <signal.h>
+    #include <sys/time.h>
+    #include <sys/resource.h>
+    #include <errno.h>
+    #define sock_t int
+    #define INVALID_SOCK -1
+    #define sclose close
+    #define BOOL int
+    #define TRUE 1
+    #define FALSE 0
+    #define CALLBACK
+    #define WINAPI
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
 
-#include "DSHA1.h"            /* thư viện SHA1 thuần C */
+#include "DSHA1.h"
 
 /* ==================== CẤU HÌNH ==================== */
-#define MAX_WORKERS 4         /* số worker ảo tối đa (mỗi timer 1 job) */
+#define MAX_WORKERS 4
 
-/* ==================== CẤU TRÚC DỮ LIỆU ==================== */
 typedef struct {
     char ip[64];
     int port;
@@ -35,32 +65,55 @@ typedef struct {
 } Config;
 
 /* ==================== BIẾN TOÀN CỤC ==================== */
-static HWND hwndMain;
-static BOOL g_running = TRUE;
+static int g_running = 1;
 static PoolInfo global_pool;
-static BOOL pool_initialized = FALSE;
+static int pool_initialized = 0;
 static Config cfg;
 static int current_worker = 0;
 
+#ifdef _WIN32
+static HWND hwndMain;
+#else
+static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 /* ==================== HÀM TIỆN ÍCH ==================== */
-void safe_usleep(int ms) { Sleep(ms); }
+void safe_usleep(int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+double get_ticks_ms(void) {
+#ifdef _WIN32
+    return (double)GetTickCount();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+#endif
+}
 
 int is_safe_mining_key(const char *key) {
     if (strchr(key, ',')) return 0;
     if (strchr(key, '\n') || strchr(key, '\r')) return 0;
     for (const char *p = key; *p; p++)
-        if (iscntrl(*p) && *p != '\t') return 0;
+        if (iscntrl((unsigned char)*p) && *p != '\t') return 0;
     return 1;
 }
 
-/* Đọc file config.txt */
+/* ==================== ĐỌC CONFIG ==================== */
 void read_config(void) {
     FILE *f = fopen("config.txt", "r");
-    /* mặc định */
     strcpy(cfg.username, "Nam2010");
     strcpy(cfg.mining_key, "258013");
     strcpy(cfg.difficulty, "LOW");
-    strcpy(cfg.rig_identifier, "Win3.1-HTTP");
+    strcpy(cfg.rig_identifier, "CrossMiner");
     cfg.thread_count = 1;
     cfg.nice_level = 0;
 
@@ -72,11 +125,11 @@ void read_config(void) {
         if (!eq) continue;
         *eq = '\0';
         char *key = line, *val = eq + 1;
-        while (isspace(*key)) key++;
+        while (isspace((unsigned char)*key)) key++;
         char *end = key + strlen(key) - 1;
-        while (end > key && isspace(*end)) *end-- = '\0';
+        while (end > key && isspace((unsigned char)*end)) *end-- = '\0';
         end = val + strlen(val) - 1;
-        while (end > val && isspace(*end)) *end-- = '\0';
+        while (end > val && isspace((unsigned char)*end)) *end-- = '\0';
         if (strcmp(key, "username") == 0) strncpy(cfg.username, val, 63);
         else if (strcmp(key, "mining_key") == 0) strncpy(cfg.mining_key, val, 63);
         else if (strcmp(key, "difficulty") == 0) strncpy(cfg.difficulty, val, 15);
@@ -89,48 +142,46 @@ void read_config(void) {
     if (cfg.thread_count > MAX_WORKERS) cfg.thread_count = MAX_WORKERS;
 }
 
-/* ==================== LẤY POOL QUA HTTP (port 80) ==================== */
-BOOL fetch_pool_from_server(PoolInfo *pool) {
-    SOCKET sock;
+/* ==================== LẤY POOL QUA HTTP ==================== */
+int fetch_pool_from_server(PoolInfo *pool) {
+    sock_t sock;
     struct sockaddr_in addr;
     struct hostent *hp;
     char request[512], response[2048];
     int len;
 
-    printf("🌐 Dang lay pool tu server (HTTP)...\n");
+    printf("Dang lay pool tu server (HTTP)...\n");
 
     hp = gethostbyname("server.duinocoin.com");
     if (!hp) {
-        printf("❌ Khong phan giai duoc server.duinocoin.com\n");
-        return FALSE;
+        printf("Khong phan giai duoc server.\n");
+        return 0;
     }
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) {
-        printf("❌ Khong tao duoc socket\n");
-        return FALSE;
+    if (sock < 0) {
+        printf("Khong tao duoc socket.\n");
+        return 0;
     }
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(80);   /* HTTP */
-    memcpy(&addr.sin_addr, hp->h_addr, hp->h_length);
+    addr.sin_port = htons(80);
+    memcpy(&addr.sin_addr, hp->h_addr_list[0], hp->h_length);
 
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        printf("❌ Khong ket noi duoc den server HTTP\n");
-        closesocket(sock);
-        return FALSE;
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        printf("Khong ket noi duoc den server HTTP.\n");
+        sclose(sock);
+        return 0;
     }
 
-    /* Gửi HTTP GET đơn giản */
     strcpy(request,
            "GET /getPool HTTP/1.0\r\n"
            "Host: server.duinocoin.com\r\n"
-           "User-Agent: DuinoMinerWin31/1.0\r\n"
+           "User-Agent: DuinoMiner/1.0\r\n"
            "Connection: close\r\n\r\n");
     send(sock, request, strlen(request), 0);
 
-    /* Nhận toàn bộ phản hồi (đọc đến khi socket đóng) */
     memset(response, 0, sizeof(response));
     len = 0;
     int total = sizeof(response) - 1;
@@ -140,95 +191,99 @@ BOOL fetch_pool_from_server(PoolInfo *pool) {
         len += got;
     }
     response[len] = '\0';
-    closesocket(sock);
+    sclose(sock);
 
-    /* Tìm body (sau header \r\n\r\n) */
     char *body = strstr(response, "\r\n\r\n");
     if (!body) body = response;
     else body += 4;
 
-    printf("📡 Phan hoi nhan duoc:\n%s\n", body);
-
-    /* Parse JSON thủ công */
     char *ip_start = strstr(body, "\"ip\":\"");
-    if (!ip_start) {
-        printf("❌ Khong tim thay IP\n");
-        return FALSE;
-    }
+    if (!ip_start) return 0;
     ip_start += 6;
     char *ip_end = strchr(ip_start, '"');
-    if (!ip_end) return FALSE;
+    if (!ip_end) return 0;
     int ip_len = ip_end - ip_start;
     if (ip_len >= 64) ip_len = 63;
     strncpy(pool->ip, ip_start, ip_len);
     pool->ip[ip_len] = '\0';
 
     char *port_start = strstr(body, "\"port\":");
-    if (!port_start) {
-        printf("❌ Khong tim thay PORT\n");
-        return FALSE;
-    }
+    if (!port_start) return 0;
     port_start += 7;
     pool->port = atoi(port_start);
 
-    printf("✅ Pool nhan duoc: %s:%d\n", pool->ip, pool->port);
-    return TRUE;
+    printf("✅ Pool: %s:%d\n", pool->ip, pool->port);
+    return 1;
 }
 
-BOOL init_global_pool(void) {
+int init_global_pool(void) {
     if (!pool_initialized) {
         if (!fetch_pool_from_server(&global_pool))
-            return FALSE;
-        pool_initialized = TRUE;
+            return 0;
+        pool_initialized = 1;
     }
-    return TRUE;
+    return 1;
 }
 
-BOOL get_pool(PoolInfo *pool) {
-    if (!pool_initialized) return FALSE;
+int get_pool(PoolInfo *pool) {
+    if (!pool_initialized) return 0;
     memcpy(pool, &global_pool, sizeof(PoolInfo));
-    return TRUE;
+    return 1;
 }
 
-/* ==================== KẾT NỐI TCP ĐẾN POOL MINING ==================== */
-SOCKET tcp_connect(const char *ip, int port) {
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) return INVALID_SOCKET;
+/* ==================== KẾT NỐI TCP ==================== */
+sock_t tcp_connect(const char *ip, int port) {
+    sock_t sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return INVALID_SOCK;
 
     struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
+
+#ifdef _WIN32
     addr.sin_addr.s_addr = inet_addr(ip);
     if (addr.sin_addr.s_addr == INADDR_NONE) {
         struct hostent *hp = gethostbyname(ip);
-        if (!hp) { closesocket(sock); return INVALID_SOCKET; }
-        memcpy(&addr.sin_addr, hp->h_addr, hp->h_length);
+        if (!hp) { sclose(sock); return INVALID_SOCK; }
+        memcpy(&addr.sin_addr, hp->h_addr_list[0], hp->h_length);
+    }
+#else
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
+        struct hostent *hp = gethostbyname(ip);
+        if (!hp) { sclose(sock); return INVALID_SOCK; }
+        memcpy(&addr.sin_addr, hp->h_addr_list[0], hp->h_length);
+    }
+    struct timeval tv = {5, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        sclose(sock);
+        return INVALID_SOCK;
     }
 
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(sock);
-        return INVALID_SOCKET;
-    }
-
-    /* Đặt timeout nhận/gửi 5 giây */
+#ifdef _WIN32
     int timeout = 5000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+#endif
     return sock;
 }
 
-BOOL send_tcp(SOCKET sock, const char *data) {
+int send_tcp(sock_t sock, const char *data) {
     int len = strlen(data);
     return send(sock, data, len, 0) == len;
 }
 
-BOOL recv_line(SOCKET sock, char *buffer, int size) {
+int recv_line(sock_t sock, char *buffer, int size) {
     int i = 0;
     char c;
     while (i < size - 1 && recv(sock, &c, 1, 0) > 0) {
         if (c == '\n') {
             buffer[i] = '\0';
-            return TRUE;
+            return 1;
         }
         buffer[i++] = c;
     }
@@ -236,7 +291,7 @@ BOOL recv_line(SOCKET sock, char *buffer, int size) {
     return i > 0;
 }
 
-/* ==================== HÀM BĂM SHA1 (dùng DSHA1.h) ==================== */
+/* ==================== SHA1 ==================== */
 static inline void sha1_string(const char *input, unsigned char *output) {
     DSHA1_CTX ctx;
     dsha1_init(&ctx);
@@ -252,8 +307,7 @@ typedef struct {
 } Job;
 
 static long long solve_job(const Job *job, double *elapsed_ms) {
-    DWORD start = GetTickCount();   /* độ phân giải ~55ms trên Win3.1 */
-
+    double start = get_ticks_ms();
     char buffer[512];
     unsigned char hash[20];
     long long max_nonce = job->diff * 100LL;
@@ -269,18 +323,12 @@ static long long solve_job(const Job *job, double *elapsed_ms) {
             buffer[base_len+1] = '0' + nonce%10;
             buffer[base_len+2] = '\0';
         } else {
-            /* dùng sprintf an toàn cho Win16 */
-            char tmp[32];
-            wsprintf(tmp, "%lld", nonce);
-            int nonce_len = strlen(tmp);
-            memcpy(buffer + base_len, tmp, nonce_len);
-            buffer[base_len + nonce_len] = '\0';
+            sprintf(buffer + base_len, "%lld", nonce);
         }
 
         sha1_string(buffer, hash);
-
         if (memcmp(hash, job->target, 20) == 0) {
-            *elapsed_ms = (double)(GetTickCount() - start);
+            *elapsed_ms = get_ticks_ms() - start;
             return nonce;
         }
     }
@@ -296,9 +344,9 @@ static const char* format_hashrate(double h) {
     return buf;
 }
 
-/* ==================== WORKER ẢO (gọi bởi timer) ==================== */
+/* ==================== WORKER ẢO ==================== */
 void do_work(int worker_id) {
-    static SOCKET sock = INVALID_SOCKET;
+    static sock_t sock = INVALID_SOCK;
     static int accepted = 0, rejected = 0;
     static time_t t0, last_stats;
 
@@ -306,16 +354,15 @@ void do_work(int worker_id) {
 
     PoolInfo pool;
     if (!get_pool(&pool)) {
-        printf("[w%d] ⚠️ Pool chua san sang.\n", worker_id);
+        printf("[w%d] Pool chua san sang.\n", worker_id);
         return;
     }
 
-    /* Kết nối lại nếu mất */
-    if (sock == INVALID_SOCKET) {
-        printf("[w%d] 🔌 Ket noi den %s:%d\n", worker_id, pool.ip, pool.port);
+    if (sock < 0) {
+        printf("[w%d] Ket noi den %s:%d\n", worker_id, pool.ip, pool.port);
         sock = tcp_connect(pool.ip, pool.port);
-        if (sock == INVALID_SOCKET) {
-            printf("[w%d] ❌ Ket noi that bai, thu lai sau.\n", worker_id);
+        if (sock < 0) {
+            printf("[w%d] Ket noi that bai.\n", worker_id);
             return;
         }
         char ver[128];
@@ -325,83 +372,77 @@ void do_work(int worker_id) {
         last_stats = t0;
     }
 
-    /* Yêu cầu job */
     char req[256];
-    wsprintf(req, "JOB,%s,%s,%s,\n", cfg.username, cfg.difficulty, cfg.mining_key);
+    sprintf(req, "JOB,%s,%s,%s,\n", cfg.username, cfg.difficulty, cfg.mining_key);
     if (!send_tcp(sock, req)) {
-        printf("[w%d] ❌ Gui JOB loi.\n", worker_id);
-        closesocket(sock); sock = INVALID_SOCKET;
+        printf("[w%d] Gui JOB loi.\n", worker_id);
+        sclose(sock); sock = INVALID_SOCK;
         return;
     }
 
-    /* Nhận job */
     char jobline[1024];
     if (!recv_line(sock, jobline, sizeof(jobline))) {
-        printf("[w%d] ❌ Khong nhan duoc job.\n", worker_id);
-        closesocket(sock); sock = INVALID_SOCKET;
+        printf("[w%d] Khong nhan job.\n", worker_id);
+        sclose(sock); sock = INVALID_SOCK;
         return;
     }
 
     char *base = strtok(jobline, ",");
     char *target_hex = strtok(NULL, ",");
     char *diff_str = strtok(NULL, ",");
-    if (!base || !target_hex || !diff_str) {
-        printf("[w%d] ⚠️ Job format loi: %s\n", worker_id, jobline);
-        return;
-    }
+    if (!base || !target_hex || !diff_str) return;
 
     Job job;
     strncpy(job.base, base, 255);
     job.base[255] = '\0';
     if (strlen(target_hex) != 40) return;
-    for (int i = 0; i < 20; i++)
+    int i;
+    for (i = 0; i < 20; i++)
         sscanf(target_hex + i*2, "%2hhx", &job.target[i]);
     job.diff = atoi(diff_str);
 
-    /* Đào */
     double elapsed;
     long long nonce = solve_job(&job, &elapsed);
     if (nonce >= 0) {
         double hashrate = (elapsed > 0) ? (nonce * 1000.0 / elapsed) : 0.0;
         char result[256];
-        wsprintf(result, "%lld,%.2f,CMiner,%s,,%u\n",
+        sprintf(result, "%lld,%.2f,CMiner,%s,,%u\n",
                 nonce, hashrate, cfg.rig_identifier, worker_id);
         if (!send_tcp(sock, result)) {
-            printf("[w%d] ❌ Gui ket qua loi.\n", worker_id);
-            closesocket(sock); sock = INVALID_SOCKET;
+            printf("[w%d] Gui ket qua loi.\n", worker_id);
+            sclose(sock); sock = INVALID_SOCK;
             return;
         }
         char feedback[128];
         if (!recv_line(sock, feedback, sizeof(feedback))) {
-            printf("[w%d] ❌ Khong co phan hoi.\n", worker_id);
-            closesocket(sock); sock = INVALID_SOCKET;
+            printf("[w%d] Khong co phan hoi.\n", worker_id);
+            sclose(sock); sock = INVALID_SOCK;
             return;
         }
         if (strcmp(feedback, "GOOD") == 0) {
             accepted++;
-            printf("[w%d] ✅ %s | Tong: %d good\n", worker_id, format_hashrate(hashrate), accepted);
+            printf("[w%d] ✅ %s | good: %d\n", worker_id, format_hashrate(hashrate), accepted);
         } else if (strncmp(feedback, "BAD,", 4) == 0) {
             rejected++;
             printf("[w%d] ❌ %s (rej=%d)\n", worker_id, feedback+4, rejected);
-        } else if (strcmp(feedback, "BLOCK") == 0) {
-            printf("[w%d] ⛓️ BLOCK FOUND!\n", worker_id);
         } else {
             printf("[w%d] %s\n", worker_id, feedback);
         }
         time_t now = time(NULL);
         if (now - last_stats >= 30) {
-            printf("[w%d] 📊 %d good / %d bad | Uptime: %.0fs\n",
+            printf("[w%d] %d good / %d bad | Uptime: %.0fs\n",
                    worker_id, accepted, rejected, difftime(now, t0));
             last_stats = now;
         }
     }
 }
 
-/* ==================== CỬA SỔ ẨN & TIMER ==================== */
+/* ==================== VÒNG LẶP CHÍNH (Linux: dùng thread) ==================== */
+#ifdef _WIN32
+/* Win16: timer + window procedure */
 LONG CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
-            /* Timer 50 ms – mỗi lần chạy một worker ảo */
             SetTimer(hwnd, 1, 50, NULL);
             return 0;
         case WM_TIMER:
@@ -411,7 +452,7 @@ LONG CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         case WM_CLOSE:
-            g_running = FALSE;
+            g_running = 0;
             KillTimer(hwnd, 1);
             DestroyWindow(hwnd);
             return 0;
@@ -421,68 +462,100 @@ LONG CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
+#else
+/* Linux: thread riêng chạy worker theo timer */
+static void *worker_loop(void *arg) {
+    (void)arg;
+    while (g_running) {
+        do_work(current_worker);
+        current_worker = (current_worker + 1) % cfg.thread_count;
+        safe_usleep(50);
+    }
+    return NULL;
+}
 
-/* ==================== WINMAIN ==================== */
+static void signal_handler(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+#endif
+
+/* ==================== MAIN ==================== */
+#ifdef _WIN32
 int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow) {
+                   LPSTR lpCmdLine, int nCmdShow)
+#else
+int main(void)
+#endif
+{
+#ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(1,1), &wsa) != 0) {
-        MessageBox(NULL, "Can not start WinSock 1.1!", "Error", MB_OK);
+        MessageBox(NULL, "WinSock 1.1 khong san sang!", "Error", MB_OK);
         return 1;
     }
+#endif
 
     read_config();
     if (!is_safe_mining_key(cfg.mining_key)) {
-        MessageBox(NULL, "Mining key invalid!", "Error", MB_OK);
-        WSACleanup();
+        fprintf(stderr, "Mining key khong hop le!\n");
         return 1;
     }
 
-    /* Đăng ký lớp cửa sổ ảo */
+#ifdef _WIN32
     WNDCLASS wc;
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = "DuinoMinerWin31";
+    wc.lpszClassName = "DuinoMiner";
     if (!RegisterClass(&wc)) {
-        MessageBox(NULL, "RegisterClass failed!", "Error", MB_OK);
         WSACleanup();
         return 1;
     }
-
-    /* Tạo cửa sổ ẩn để nhận timer */
-    hwndMain = CreateWindow("DuinoMinerWin31", "Duino-Coin Miner",
+    hwndMain = CreateWindow("DuinoMiner", "Duino-Coin Miner",
                              WS_OVERLAPPEDWINDOW, 0, 0, 0, 0,
                              NULL, NULL, hInstance, NULL);
     if (!hwndMain) {
-        MessageBox(NULL, "CreateWindow failed!", "Error", MB_OK);
         WSACleanup();
         return 1;
     }
+#endif
 
     printf("========================================\n");
-    printf("  Duino-Coin C Miner Win16 – HTTP mode\n");
+    printf("  Duino-Coin C Miner (cross Win16/Linux)\n");
     printf("========================================\n");
-    printf("User: %s  Difficulty: %s  Workers: %d\n",
+    printf("User: %s  Diff: %s  Workers: %d\n",
            cfg.username, cfg.difficulty, cfg.thread_count);
-    printf("Trying to get pool...\n");
 
     if (!init_global_pool()) {
-        MessageBox(NULL, "Can not fetch pool info!", "Error", MB_OK);
-        DestroyWindow(hwndMain);
-        WSACleanup();
+        fprintf(stderr, "Khong the lay pool info!\n");
         return 1;
     }
 
-    printf("Miner started. Close window or press Ctrl+C in DOS box to stop.\n");
+    printf("Miner started. Press Ctrl+C to stop.\n");
 
-    /* Vòng lặp message */
+#ifdef _WIN32
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
     WSACleanup();
+#else
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, worker_loop, NULL);
+    while (g_running) safe_usleep(200);
+    g_running = 0;
+    pthread_join(tid, NULL);
+#endif
+
+    printf("Miner stopped.\n");
     return 0;
 }
