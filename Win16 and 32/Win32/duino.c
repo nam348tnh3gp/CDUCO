@@ -24,6 +24,7 @@
     #include <arpa/inet.h>
     #include <signal.h>
     #include <sys/time.h>
+    #include <sys/resource.h>
     #include <errno.h>
 #endif
 
@@ -74,7 +75,10 @@ static void sleep_ms(int ms) {
 #ifdef _WIN32
     Sleep(ms);
 #else
-    usleep(ms * 1000);
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 #endif
 }
 
@@ -255,7 +259,7 @@ int fetch_pool_from_server(PoolInfo *pool) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(80);
-    memcpy(&addr.sin_addr, hp->h_addr, hp->h_length);
+    memcpy(&addr.sin_addr, hp->h_addr_list[0], hp->h_length);
 
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(sock);
@@ -345,7 +349,7 @@ socket_t tcp_connect(const char *ip, int port) {
     if (addr.sin_addr.s_addr == INADDR_NONE) {
         struct hostent *h = gethostbyname(ip);
         if (!h) { closesocket(sock); return INVALID_SOCKET_T; }
-        memcpy(&addr.sin_addr, h->h_addr, h->h_length);
+        memcpy(&addr.sin_addr, h->h_addr_list[0], h->h_length);
     }
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         closesocket(sock);
@@ -358,7 +362,7 @@ socket_t tcp_connect(const char *ip, int port) {
     if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
         struct hostent *h = gethostbyname(ip);
         if (!h) { close(sock); return -1; }
-        memcpy(&addr.sin_addr, h->h_addr, h->h_length);
+        memcpy(&addr.sin_addr, h->h_addr_list[0], h->h_length);
     }
     struct timeval tv = {5, 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
