@@ -1,14 +1,17 @@
 /*
- * DUINO-COIN C MINER – Cross‑platform (Win16 / Win32 / Linux)
+ * DUINO-COIN C MINER – Cross‑platform (Win16 / Win32 / Linux / macOS)
+ *
+ * Build macOS:
+ *   gcc -O2 -s -o duino duino.c -lpthread
+ *
+ * Build Linux:
+ *   gcc -O2 -s -o duino duino.c -lpthread
  *
  * Build Windows 3.1 (16-bit):
  *   cl /AM /G2 /Os duino.c dsha1.c winsock.lib
  *
  * Build Windows (32-bit, cross‑compile or native):
  *   i686-w64-mingw32-gcc -O2 -s -static -o duino.exe duino.c -lws2_32 -lwininet
- *
- * Build Linux:
- *   gcc -O2 -s -o duino duino.c -lpthread
  */
 
 #ifdef _WIN32
@@ -21,6 +24,17 @@
     #include <wininet.h>
     #pragma comment(lib, "ws2_32.lib")
     #pragma comment(lib, "wininet.lib")
+#elif defined(__APPLE__)
+    /* ========== macOS ========== */
+    #include <unistd.h>
+    #include <pthread.h>
+    #include <sys/socket.h>
+    #include <netdb.h>
+    #include <arpa/inet.h>
+    #include <signal.h>
+    #include <sys/time.h>
+    #include <sys/resource.h>
+    #include <errno.h>
 #else
     /* ========== Linux ========== */
     #define _POSIX_C_SOURCE 199309L
@@ -150,7 +164,7 @@ static void thread_join(thread_t thread) {
 #endif
 }
 
-/* signal handler cho Linux */
+/* signal handler cho UNIX (Linux/macOS) */
 #ifndef _WIN32
 static void signal_handler(int sig) {
     (void)sig;
@@ -184,9 +198,9 @@ void read_config(const char *filename, Config *cfg) {
     strcpy(cfg->username, "Nam2010");
     strcpy(cfg->mining_key, "258013");
     strcpy(cfg->difficulty, "LOW");
-    strcpy(cfg->rig_identifier, "CrossMiner");
+    strcpy(cfg->rig_identifier, "MacMiner");
     cfg->thread_count = 2;
-    cfg->nice_level = 19;   /* <-- MẶC ĐỊNH: IDLE / nice 19 */
+    cfg->nice_level = 19;   /* IDLE */
 
     if (!f) return;
     char line[256];
@@ -251,6 +265,7 @@ int fetch_pool_from_server(PoolInfo *pool) {
     return 1;
 }
 #else
+/* macOS / Linux: dùng BSD socket thô */
 int fetch_pool_from_server(PoolInfo *pool) {
     struct hostent *hp = gethostbyname("server.duinocoin.com");
     if (!hp) return 0;
@@ -272,7 +287,7 @@ int fetch_pool_from_server(PoolInfo *pool) {
     const char *request =
         "GET /getPool HTTP/1.0\r\n"
         "Host: server.duinocoin.com\r\n"
-        "User-Agent: DuinoMinerLinux\r\n"
+        "User-Agent: DuinoMinerMac/1.0\r\n"
         "Connection: close\r\n\r\n";
     send(sock, request, strlen(request), 0);
 
@@ -399,7 +414,7 @@ int recv_line(socket_t sock, char *buffer, int size) {
     return i > 0;
 }
 
-/* ====================== HÀM BĂM SHA1 ====================== */
+/* ====================== SHA1 ====================== */
 static inline void sha1_string(const char *input, unsigned char *output) {
     DSHA1_CTX ctx;
     dsha1_init(&ctx);
@@ -416,7 +431,6 @@ typedef struct {
 
 static long long solve_job(const Job *job, double *elapsed_ms) {
     double start = get_time_ms();
-
     char buffer[512];
     unsigned char hash[20];
     long long max_nonce = job->diff * 100LL;
@@ -426,11 +440,11 @@ static long long solve_job(const Job *job, double *elapsed_ms) {
     for (long long nonce = 0; nonce <= max_nonce; nonce++) {
         if (nonce < 10) {
             buffer[base_len] = '0' + nonce;
-            buffer[base_len + 1] = '\0';
+            buffer[base_len+1] = '\0';
         } else if (nonce < 100) {
-            buffer[base_len] = '0' + nonce / 10;
-            buffer[base_len + 1] = '0' + nonce % 10;
-            buffer[base_len + 2] = '\0';
+            buffer[base_len] = '0' + nonce/10;
+            buffer[base_len+1] = '0' + nonce%10;
+            buffer[base_len+2] = '\0';
         } else {
             sprintf(buffer + base_len, "%lld", nonce);
         }
@@ -446,9 +460,9 @@ static long long solve_job(const Job *job, double *elapsed_ms) {
 
 static const char* format_hashrate(double h) {
     static char buf[64];
-    if (h >= 1e9)      sprintf(buf, "%.2f GH/s", h / 1e9);
-    else if (h >= 1e6) sprintf(buf, "%.2f MH/s", h / 1e6);
-    else if (h >= 1e3) sprintf(buf, "%.2f kH/s", h / 1e3);
+    if (h >= 1e9)      sprintf(buf, "%.2f GH/s", h/1e9);
+    else if (h >= 1e6) sprintf(buf, "%.2f MH/s", h/1e6);
+    else if (h >= 1e3) sprintf(buf, "%.2f kH/s", h/1e3);
     else               sprintf(buf, "%.2f H/s", h);
     return buf;
 }
@@ -518,7 +532,7 @@ void *worker_thread_func(void *param) {
             job.base[255] = '\0';
             if (strlen(target_hex) != 40) continue;
             for (int i = 0; i < 20; i++)
-                sscanf(target_hex + i * 2, "%2hhx", &job.target[i]);
+                sscanf(target_hex + i*2, "%2hhx", &job.target[i]);
             job.diff = atoi(diff_str);
 
             double elapsed;
@@ -538,7 +552,7 @@ void *worker_thread_func(void *param) {
                     printf("[w%d] ✅ %s | good: %d\n", id, format_hashrate(hashrate), accepted);
                 } else if (strncmp(feedback, "BAD,", 4) == 0) {
                     rejected++;
-                    printf("[w%d] ❌ %s (rej=%d)\n", id, feedback + 4, rejected);
+                    printf("[w%d] ❌ %s (rej=%d)\n", id, feedback+4, rejected);
                 } else if (strcmp(feedback, "BLOCK") == 0) {
                     printf("[w%d] ⛓️ BLOCK!\n", id);
                 } else {
@@ -571,16 +585,13 @@ void set_miner_priority(int nice_level) {
     DWORD prio;
     if (nice_level >= 19) {
         prio = IDLE_PRIORITY_CLASS;
-        printf("✅ CPU priority: IDLE (minimum) - miner only runs when PC is idle\n");
+        printf("✅ CPU priority: IDLE (minimum)\n");
     } else if (nice_level >= 10) {
         prio = BELOW_NORMAL_PRIORITY_CLASS;
-        printf("✅ CPU priority: BELOW NORMAL (lower than normal apps)\n");
+        printf("✅ CPU priority: BELOW NORMAL\n");
     } else if (nice_level <= -10) {
         prio = HIGH_PRIORITY_CLASS;
-        printf("⚠️ CPU priority: HIGH (may affect other apps)\n");
-    } else if (nice_level <= -20) {
-        prio = REALTIME_PRIORITY_CLASS;
-        printf("⚠️ CPU priority: REALTIME (dangerous!)\n");
+        printf("⚠️ CPU priority: HIGH\n");
     } else {
         prio = NORMAL_PRIORITY_CLASS;
         printf("✅ CPU priority: NORMAL\n");
@@ -593,9 +604,9 @@ void set_miner_priority(int nice_level) {
         setpriority(PRIO_PROCESS, 0, nice_level);
     }
     printf("✅ CPU priority: nice=%d (%s)\n", nice_level,
-           nice_level >= 19 ? "MINIMUM - chỉ chạy khi CPU rảnh" :
+           nice_level >= 19 ? "MINIMUM - chạy nền" :
            nice_level >= 10 ? "LOW" :
-           nice_level <= -10 ? "HIGH (cần root)" :
+           nice_level <= -10 ? "HIGH (quyền root)" :
            nice_level < 0 ? "ABOVE NORMAL" : "NORMAL");
 #endif
 }
@@ -616,6 +627,13 @@ int main(void) {
 
     printf("\n========================================\n");
     printf("   Duino-Coin C Miner (Cross-platform)\n");
+#ifdef __APPLE__
+    printf("   🍎 macOS build\n");
+#elif defined(__linux__)
+    printf("   🐧 Linux build\n");
+#else
+    printf("   🪟 Windows build\n");
+#endif
     printf("========================================\n");
     printf("Username:   %s\n", cfg.username);
     printf("Difficulty: %s\n", cfg.difficulty);
@@ -650,9 +668,7 @@ int main(void) {
         threads[i] = thread_create(worker_thread_func, &args[i]);
     }
 
-    while (g_running) {
-        sleep_ms(200);
-    }
+    while (g_running) sleep_ms(200);
 
     printf("\nDang dung miner...\n");
     g_running = 0;
