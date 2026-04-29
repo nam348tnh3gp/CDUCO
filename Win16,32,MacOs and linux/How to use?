@@ -1,0 +1,20 @@
+# Debian/Ubuntu/Mint
+sudo apt install build-essential
+
+# Fedora/RHEL
+sudo dnf install gcc make
+
+# Arch/Manjaro
+sudo pacman -S base-devel
+#build
+gcc -O2 -s -o duino duino.c -lpthread
+
+#MacOs
+xcode-select --install
+gcc -O2 -s -o duino duino.c -lpthread
+
+#windows with MinGW-w64(native)
+gcc -O2 -s -static -o duino.exe duino.c -lws2_32 -lwininet
+
+#windows3.1 (with winsock 3.11 and MSVC 1.5)
+cl /AM /G2 /Os duino.c winsock.lib
